@@ -206,10 +206,16 @@ function extractResearchReport(chatJson) {
 // --- Chromium boot ------------------------------------------------------------
 function findChromium() {
   const root = `${process.env.HOME}/.cache/ms-playwright`
-  if (existsSync(root)) {
-    for (const dir of readdirSync(root)) {
-      if (!dir.startsWith("chromium-")) continue
-      const bin = `${root}/${dir}/chrome-linux/chrome`
+  if (!existsSync(root)) return null
+  const rels = [
+    "chrome-linux64/chrome",                                  // Chrome for Testing layout (playwright >= 1.53)
+    "chrome-linux/chrome",                                    // legacy playwright layout
+    "chrome-headless-shell-linux64/chrome-headless-shell",    // headless shell fallback
+  ]
+  const dirs = readdirSync(root).filter((d) => d.startsWith("chromium")).sort().reverse()
+  for (const dir of dirs) {
+    for (const rel of rels) {
+      const bin = `${root}/${dir}/${rel}`
       if (existsSync(bin)) return bin
     }
   }
