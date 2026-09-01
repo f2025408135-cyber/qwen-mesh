@@ -506,6 +506,7 @@ async function runCollect() {
     }
     writeFileSync(`${OUT_DIR}/result.json`, JSON.stringify(result, null, 2))
     log("DONE:", JSON.stringify(result))
+    process.exit(0)
   } catch (e) {
     fail(e.status || 502, e.message)
   }
