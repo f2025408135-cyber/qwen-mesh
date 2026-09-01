@@ -233,8 +233,9 @@ async function bootPod() {
   const bin = findChromium()
   if (!bin) fail(500, "chromium binary not found (playwright install failed?)")
   log("launching chromium:", bin)
-  const child = spawn(bin, [
-    "--headless=new",
+  const headed = (process.env.INPUT_HEADED || "0") === "1"
+  const flags = [
+    headed ? "--window-position=0,0" : "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
@@ -243,9 +244,11 @@ async function bootPod() {
     "--no-first-run",
     "--no-default-browser-check",
     "--window-size=1280,900",
-    // Normal desktop-Chrome UA — HeadlessChrome UAs get WAF-tarpitted on the
-    // streaming completions endpoint (field-verified 2026-09-01).
+    // Normal desktop-Chrome UA + no automation bits — headless/automation
+    // fingerprints get WAF-tarpitted on the completions endpoint
+    // (field-verified 2026-09-01).
     "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "--disable-blink-features=AutomationControlled",
     // Stop background-page throttling: hidden headless pages delay setTimeout
     // (our in-page AbortController timers!) and stall fetch — probes then hang
     // instead of returning (field-verified 2026-09-01).
@@ -253,7 +256,8 @@ async function bootPod() {
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "https://chat.qwen.ai/",
-  ], { stdio: "ignore" })
+  ]
+  const child = spawn(bin, flags, { stdio: "ignore" })
   child.on("exit", (code) => log("chromium exited:", code))
   for (let i = 0; i < 30; i++) {
     try {
