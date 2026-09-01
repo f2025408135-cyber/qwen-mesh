@@ -212,7 +212,8 @@ function findChromium() {
     "chrome-linux/chrome",                                    // legacy playwright layout
     "chrome-headless-shell-linux64/chrome-headless-shell",    // headless shell fallback
   ]
-  const dirs = readdirSync(root).filter((d) => d.startsWith("chromium")).sort().reverse()
+  const dirs = readdirSync(root).filter((d) => d.startsWith("chromium"))
+  dirs.sort((a, b) => (b.includes("headless") ? -1 : 1) - (a.includes("headless") ? -1 : 1) || b.localeCompare(a))
   for (const dir of dirs) {
     for (const rel of rels) {
       const bin = `${root}/${dir}/${rel}`
@@ -288,7 +289,12 @@ async function downloadTo(url, destPath) {
 // --- Modes ---------------------------------------------------------------------
 async function runSpike() {
   const chatId = await loginPod()
-  const j = await qwenApi(`/api/v2/chat/completions?chat_id=${chatId}`, completionsBody(chatId, [userMessage("Reply with exactly: SPIKE-OK")]), "POST", 120000)
+  // thinking off for the probe — we want a fast terminal reply, not a thinking stream
+  const probeMsg = userMessage("Reply with exactly: SPIKE-OK")
+  probeMsg.feature_config.thinking_enabled = false
+  probeMsg.feature_config.auto_thinking = false
+  probeMsg.feature_config.thinking_mode = "Fast"
+  const j = await qwenApi(`/api/v2/chat/completions?chat_id=${chatId}`, completionsBody(chatId, [probeMsg]), "POST", 300000)
   const sse = String(j && typeof j === "object" ? JSON.stringify(j) : j)
   const ok = sse.includes("SPIKE-OK") || sse.includes('"content"')
   const result = {
