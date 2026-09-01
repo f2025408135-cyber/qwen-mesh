@@ -1,8 +1,7 @@
-# mesh-run.ps1 — one-command hybrid qwen deep research:
+# mesh-run.ps1 - one-command hybrid qwen deep research:
 #   local fire (residential IP, ~1-3 min pod time) -> GitHub Actions poll + collect
 # Usage:
 #   .\local\mesh-run.ps1 -Topic "<scoping-template topic>" [-Account 1] [-MaxWait 1800] [-Wait]
-#   (Focus/Audience optional)
 param(
   [Parameter(Mandatory = $true)][string]$Topic,
   [string]$Focus = "",
@@ -39,7 +38,7 @@ if (-not $Wait) { Write-Output "watch/download later: gh run watch $runId -R $Re
 
 # 3) wait + collect
 gh run watch $runId -R $Repo --exit-status --interval 20
-if ($LASTEXITCODE -ne 0) { Write-Error "collect run failed — check the log"; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Error "collect run failed - check the run log"; exit 1 }
 $tmp = Join-Path $env:TEMP "qwen-mesh-$runId"
 gh run download $runId -R $Repo -n "research-$runId" -D $tmp
 $res = Get-Content (Join-Path $tmp "result.json") -Raw | ConvertFrom-Json
@@ -50,15 +49,14 @@ $ts = Get-Date -Format "yyyyMMdd-HHmmss"
 $mdPath = Join-Path $OutDir "qwen-research-$ts.md"
 Copy-Item (Join-Path $tmp "report.md") $mdPath -Force
 $pdfSrc = Join-Path $tmp "report.pdf"
-$pdfPath = $null
+$pdfPath = "n/a"
 if (Test-Path $pdfSrc) { $pdfPath = Join-Path $OutDir "qwen-research-$ts.pdf"; Copy-Item $pdfSrc $pdfPath -Force }
 $head = (Get-Content $mdPath -TotalCount 1)
 $bytes = (Get-Item $mdPath).Length
-Write-Output (@"
-Done.
-- What: deep research (chat $($f.chat_id), account $($f.account_index), $($res.references_count) refs, elapsed $($res.elapsed_sec)s remote)
-- Files:
-  - $mdPath ($bytes bytes)
-  - $pdfPath
-- Verified: md head = $head
-"@)
+Write-Output ""
+Write-Output "Done."
+Write-Output "- What: deep research (chat $($f.chat_id), account $($f.account_index), $($res.references_count) refs, remote collect $($res.elapsed_sec)s)"
+Write-Output "- Files:"
+Write-Output "  - $mdPath ($bytes bytes)"
+Write-Output "  - $pdfPath"
+Write-Output "- Verified: md head = $head"
