@@ -177,4 +177,7 @@ for (let i = 0; i < 6; i++) {
   await sleep(10000)
 }
 
+// Kill the pod if we launched it (we only needed it for the POST)
+if (pod) { try { pod.kill(); log("pod closed") } catch {} }
+
 console.log(JSON.stringify({ ok: true, chat_id: chatId, account_index: accountIndex, notice_returned: noticeOk, notice_seen: noticeSeen }))
