@@ -237,6 +237,9 @@ async function bootPod() {
     "--no-first-run",
     "--no-default-browser-check",
     "--window-size=1280,900",
+    // Normal desktop-Chrome UA — HeadlessChrome UAs get WAF-tarpitted on the
+    // streaming completions endpoint (field-verified 2026-09-01).
+    "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
     "https://chat.qwen.ai/",
   ], { stdio: "ignore" })
   child.on("exit", (code) => log("chromium exited:", code))
@@ -295,9 +298,9 @@ async function runSpike() {
   const body = completionsBody(chatId, [userMessage("Reply with exactly: SPIKE-OK")])
   const payload = JSON.stringify(body)
   const headers = `{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${token}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()}`
-  const expr = `(async()=>{try{const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${chatId}',{method:'POST',headers:${headers},body:${JSON.stringify(payload)}});const reader=r.body.getReader();const dec=new TextDecoder();let buf='';let chunks=0;const t0=Date.now();while(Date.now()-t0<60000){const{done,value}=await reader.read();if(done)break;chunks++;buf+=dec.decode(value,{stream:true});if(buf.includes('data:'))break}try{reader.cancel()}catch{};return JSON.stringify({status:r.status,bytes:buf.length,chunks,head:buf.slice(0,400)})}catch(e){return JSON.stringify({status:0,head:'FETCH_ERR:'+e.message})}})()`
-  const probe = JSON.parse(await cdpEval(expr, 90000))
-  log("stream probe:", JSON.stringify({ status: probe.status, bytes: probe.bytes, chunks: probe.chunks, head: String(probe.head).slice(0, 200) }))
+  const expr = `(async()=>{try{const ctl=new AbortController();setTimeout(()=>ctl.abort(),30000);const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${chatId}',{method:'POST',headers:${headers},body:${JSON.stringify(payload)},signal:ctl.signal});const hdr={status:r.status,ct:r.headers.get('content-type')};const reader=r.body.getReader();const dec=new TextDecoder();let buf='';let chunks=0;const t0=Date.now();while(Date.now()-t0<45000){const{done,value}=await reader.read();if(done)break;chunks++;buf+=dec.decode(value,{stream:true});if(buf.includes('data:'))break}try{reader.cancel()}catch{};return JSON.stringify({...hdr,bytes:buf.length,chunks,head:buf.slice(0,400)})}catch(e){return JSON.stringify({status:0,head:'FETCH_ERR:'+e.message})}})()`
+  const probe = JSON.parse(await cdpEval(expr, 100000))
+  log("stream probe:", JSON.stringify({ status: probe.status, ct: probe.ct, bytes: probe.bytes, chunks: probe.chunks, head: String(probe.head).slice(0, 200) }))
   const flowing = probe.status === 200 && probe.bytes > 0
   const result = {
     ok: flowing,
