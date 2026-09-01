@@ -434,6 +434,10 @@ async function runResearch() {
 
 process.on("uncaughtException", (e) => fail(500, `uncaught: ${e.message}`))
 process.on("unhandledRejection", (e) => fail(500, `unhandled rejection: ${e?.message ?? String(e)}`))
+// Hard process timeout: kill the runner even if the poll loop hangs (CDP zombie
+// WebSocket issue observed 2026-09-01 — eval timers fire but page JS stays busy).
+const hardTimeoutMs = (maxWaitMs || 1500000) + 300000
+setTimeout(() => { console.log(`[pod ${accountIndex}] HARD TIMEOUT after ${Math.round(hardTimeoutMs/1000)}s`); process.exit(1) }, hardTimeoutMs).unref()
 
 // --- Modes ---------------------------------------------------------------------
 // HYBRID mode: the completions POST is IP-blocked from GitHub runners, but the
