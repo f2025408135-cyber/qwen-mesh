@@ -292,29 +292,39 @@ async function downloadTo(url, destPath) {
 // --- Modes ---------------------------------------------------------------------
 async function runSpike() {
   const chatId = await loginPod()
-  // Stream probe: start the completion and read only until the FIRST SSE data
-  // event (or 60s) — proves data flows from the runner IP without waiting for
-  // the whole stream (thinking/auto modes can hold a stream open for minutes).
-  const body = completionsBody(chatId, [userMessage("Reply with exactly: SPIKE-OK")])
-  const payload = JSON.stringify(body)
-  const headers = `{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${token}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()}`
-  const expr = `(async()=>{try{const ctl=new AbortController();setTimeout(()=>ctl.abort(),30000);const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${chatId}',{method:'POST',headers:${headers},body:${JSON.stringify(payload)},signal:ctl.signal});const hdr={status:r.status,ct:r.headers.get('content-type')};const reader=r.body.getReader();const dec=new TextDecoder();let buf='';let chunks=0;const t0=Date.now();while(Date.now()-t0<45000){const{done,value}=await reader.read();if(done)break;chunks++;buf+=dec.decode(value,{stream:true});if(buf.includes('data:'))break}try{reader.cancel()}catch{};return JSON.stringify({...hdr,bytes:buf.length,chunks,head:buf.slice(0,400)})}catch(e){return JSON.stringify({status:0,head:'FETCH_ERR:'+e.message})}})()`
-  const probe = JSON.parse(await cdpEval(expr, 100000))
-  log("stream probe:", JSON.stringify({ status: probe.status, ct: probe.ct, bytes: probe.bytes, chunks: probe.chunks, head: String(probe.head).slice(0, 200) }))
-  const flowing = probe.status === 200 && probe.bytes > 0
+  const mkHeaders = () => `{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${token}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()}`
+  const payload = JSON.stringify(completionsBody(chatId, [userMessage("Reply with exactly: SPIKE-OK")]))
+
+  // Probe A: SSE (stream:true) — read only until the FIRST data event (45s cap)
+  const exprA = `(async()=>{try{const ctl=new AbortController();setTimeout(()=>ctl.abort(),20000);const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${chatId}',{method:'POST',headers:${mkHeaders()},body:${JSON.stringify(payload)},signal:ctl.signal});const reader=r.body.getReader();const dec=new TextDecoder();let buf='';let chunks=0;const t0=Date.now();while(Date.now()-t0<45000){const{done,value}=await reader.read();if(done)break;chunks++;buf+=dec.decode(value,{stream:true});if(buf.includes('data:'))break}try{reader.cancel()}catch{};return JSON.stringify({status:r.status,ct:r.headers.get('content-type'),bytes:buf.length,chunks,head:buf.slice(0,300)})}catch(e){return JSON.stringify({status:0,head:'FETCH_ERR:'+e.message})}})()`
+  let probeA = {}
+  try { probeA = JSON.parse(await cdpEval(exprA, 80000)) } catch (e) { probeA = { status: -1, head: e.message } }
+  log("probeA SSE:", JSON.stringify({ status: probeA.status, bytes: probeA.bytes, chunks: probeA.chunks, head: String(probeA.head).slice(0, 160) }))
+
+  // Probe B: NON-STREAM (stream:false) — single JSON response, 90s cap.
+  // If the WAF black-holes SSE responses but allows normal JSON, this returns.
+  const nb = completionsBody(chatId, [userMessage("Reply with exactly: SPIKE-OK")])
+  nb.stream = false
+  nb.incremental_output = false
+  const exprB = `(async()=>{try{const ctl=new AbortController();setTimeout(()=>ctl.abort(),85000);const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${chatId}',{method:'POST',headers:${mkHeaders()},body:${JSON.stringify(nb)},signal:ctl.signal});const t=await r.text();return JSON.stringify({status:r.status,ct:r.headers.get('content-type'),bytes:t.length,head:t.slice(0,300)})}catch(e){return JSON.stringify({status:0,head:'FETCH_ERR:'+e.message})}})()`
+  let probeB = {}
+  try { probeB = JSON.parse(await cdpEval(exprB, 100000)) } catch (e) { probeB = { status: -1, head: e.message } }
+  log("probeB nonstream:", JSON.stringify({ status: probeB.status, bytes: probeB.bytes, head: String(probeB.head).slice(0, 200) }))
+
+  const ok = (probeB.status === 200 && probeB.bytes > 0) || (probeA.status === 200 && probeA.bytes > 0)
   const result = {
-    ok: flowing,
-    status: flowing ? "SPIKE-PASS" : "SPIKE-FAIL",
+    ok,
+    status: ok ? "SPIKE-PASS" : "SPIKE-FAIL",
     account_index: accountIndex,
-    waf: "in-origin fetch accepted from runner IP",
-    login: "verified via chats/new",
-    stream_probe: flowing ? "SSE data flowing" : `no stream data (status ${probe.status}, head ${String(probe.head).slice(0, 100)})`,
+    waf: "JSON endpoints accept runner IP (chats/new); SSE completions tarpits",
+    probe_sse: { status: probeA.status, bytes: probeA.bytes ?? 0 },
+    probe_nonstream: { status: probeB.status, bytes: probeB.bytes ?? 0, verdict: probeB.bytes > 0 ? "non-stream WORKS — switch to stream:false" : "blocked too" },
     elapsed_sec: Math.round((Date.now() - t0) / 1000),
   }
   mkdirSync(OUT_DIR, { recursive: true })
   writeFileSync(`${OUT_DIR}/result.json`, JSON.stringify(result, null, 2))
   log("SPIKE RESULT:", JSON.stringify(result))
-  if (!flowing) process.exit(1)
+  if (!ok) process.exit(1)
 }
 
 async function runResearch() {
