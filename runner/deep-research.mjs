@@ -244,12 +244,14 @@ async function bootPod() {
 }
 
 async function loginPod() {
+  await bootPod()
   // Inject the JWT into the page's localStorage, reload, then prove the
   // session is real by creating a chat in-origin (this ALSO proves the WAF
   // accepts the runner's Azure IP for in-page fetch — the whole spike bet).
   for (let i = 0; i < 20; i++) {
-    const href = await cdpEval("location.href").catch(() => null)
+    const href = await cdpEval("location.href").catch((e) => { if (i >= 5) log(`href probe ${i}: ${e.message}`); return null })
     if (String(href ?? "").startsWith("https://chat.qwen.ai")) break
+    if (i === 19) fail(502, "page never reached https://chat.qwen.ai (chromium/CDP dead or navigation blocked)")
     await sleep(2000)
   }
   await cdpEval(`localStorage.setItem('token', ${JSON.stringify(token)}); 'set'`)
@@ -360,6 +362,9 @@ async function runResearch() {
     fail(e.status || 502, e.message)
   }
 }
+
+process.on("uncaughtException", (e) => fail(500, `uncaught: ${e.message}`))
+process.on("unhandledRejection", (e) => fail(500, `unhandled rejection: ${e?.message ?? String(e)}`))
 
 if (mode === "spike") await runSpike()
 else await runResearch()
