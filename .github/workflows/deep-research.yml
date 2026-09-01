@@ -1,0 +1,91 @@
+name: deep-research
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: 'Fully-specified research topic (scoping template — skip clarifying questions)'
+        required: true
+        type: string
+      focus:
+        description: 'technical | industry | practical (optional)'
+        required: false
+        type: string
+        default: ''
+      audience:
+        description: 'Reader level (optional)'
+        required: false
+        type: string
+        default: ''
+      max_wait_seconds:
+        description: 'Max seconds to wait for the report (default 1500)'
+        required: false
+        type: string
+        default: '1500'
+      account_index:
+        description: 'Qwen account/pod index 1-5 (one dispatch per account for parallel waves)'
+        required: false
+        type: string
+        default: '1'
+      mode:
+        description: 'spike = login+WAF probe only | research = full deep research'
+        required: false
+        type: string
+        default: 'research'
+
+concurrency:
+  group: qwen-account-${{ github.event.inputs.account_index }}
+  cancel-in-progress: false
+
+jobs:
+  pod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache chromium (playwright)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: qwen-mesh-chromium-v1
+
+      - name: Install chromium
+        run: npx -y playwright install --with-deps chromium
+
+      - name: Run remote pod
+        env:
+          QWEN_JWT_1: ${{ secrets.QWEN_JWT_1 }}
+          QWEN_JWT_2: ${{ secrets.QWEN_JWT_2 }}
+          QWEN_JWT_3: ${{ secrets.QWEN_JWT_3 }}
+          QWEN_JWT_4: ${{ secrets.QWEN_JWT_4 }}
+          QWEN_JWT_5: ${{ secrets.QWEN_JWT_5 }}
+          INPUT_TOPIC: ${{ github.event.inputs.topic }}
+          INPUT_FOCUS: ${{ github.event.inputs.focus }}
+          INPUT_AUDIENCE: ${{ github.event.inputs.audience }}
+          INPUT_MAX_WAIT_SECONDS: ${{ github.event.inputs.max_wait_seconds }}
+          INPUT_ACCOUNT_INDEX: ${{ github.event.inputs.account_index }}
+          INPUT_MODE: ${{ github.event.inputs.mode }}
+        run: node runner/deep-research.mjs
+
+      - name: Step summary
+        if: always()
+        run: |
+          if [ -f out/result.json ]; then
+            echo "### qwen-mesh pod result" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat out/result.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-${{ github.run_id }}
+          path: out/
+          retention-days: 30
