@@ -154,12 +154,15 @@ const body = JSON.stringify({
   messages: [deepResearchMessage(content)], timestamp: Math.floor(Date.now() / 1000),
 })
 let noticeOk = false
+let postStatus = 0
 try {
-  await cdpEval(`(async()=>{try{await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${chatId}',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${account.ticket}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()},body:${JSON.stringify(body)}})}catch(e){} return 'fired'})()`, fireCapMs)
-  noticeOk = true
-  log("notice phase returned (research confirmed started)")
+  postStatus = await cdpEval(`(async()=>{try{const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${chatId}',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${account.ticket}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()},body:${JSON.stringify(body)}});const st=r.status;const t=await r.text();return JSON.stringify({status:st,bodyLen:t.length,head:t.slice(0,200)})}catch(e){return JSON.stringify({status:0,error:e.message})}})()`, fireCapMs)
+  const postResult = JSON.parse(postStatus)
+  postStatus = postResult.status
+  log("completions POST:", JSON.stringify(postResult).slice(0, 300))
+  noticeOk = postResult.status === 200
 } catch {
-  log(`notice stream still open after ${fireCapMs / 1000}s — POST delivered, research continues server-side`)
+  log(`completions POST eval timed out after ${fireCapMs / 1000}s (stream may be open)`)
 }
 
 // 3) confirm the chat shows research activity (ResearchNotice/content_list)
@@ -180,4 +183,4 @@ for (let i = 0; i < 6; i++) {
 // Kill the pod if we launched it (we only needed it for the POST)
 if (pod) { try { pod.kill(); log("pod closed") } catch {} }
 
-console.log(JSON.stringify({ ok: true, chat_id: chatId, account_index: accountIndex, notice_returned: noticeOk, notice_seen: noticeSeen }))
+console.log(JSON.stringify({ ok: true, chat_id: chatId, account_index: accountIndex, completions_status: postStatus, notice_returned: noticeOk, notice_seen: noticeSeen }))
