@@ -322,11 +322,21 @@ async function runResearch() {
     if (audience) content += `\nAudience: ${audience}`
     const chatId = await createChat()
     log("research chat:", chatId)
-    // The completions stream returns the ResearchNotice after 2-8 min; the
-    // report is generated in the background and collected via the poll loop.
-    const noticeBudget = Math.min(maxWaitMs + 180000, 45 * 60 * 1000)
-    await qwenApi(`/api/v2/chat/completions?chat_id=${chatId}`, completionsBody(chatId, [deepResearchMessage(content)]), "POST", noticeBudget)
-    log("notice phase done — polling for the report")
+    // 1) send the deep_research completion. Normally the stream returns a
+    //    ResearchNotice after 2-8 min. On datacenter IPs the SSE stream may be
+    //    TARPITTED (connection open, zero bytes) — so we fire-and-forget with a
+    //    hard cap: if the stream stalls, the POST was still delivered and the
+    //    research runs server-side; the poll loop below collects the report.
+    const noticeBudgetMs = Math.min(maxWaitMs + 180000, 3 * 60 * 1000)
+    try {
+      await qwenApi(`/api/v2/chat/completions?chat_id=${chatId}`, completionsBody(chatId, [deepResearchMessage(content)]), "POST", noticeBudgetMs)
+      log("notice phase done")
+    } catch (e) {
+      if (e.message && e.message.includes("CDP eval timeout")) {
+        log(`notice stream stalled after ${noticeBudgetMs / 1000}s (tarpit?) — treating as fire-and-forget, polling for the report`)
+      } else throw e
+    }
+    log("polling for the report")
     const deadline = Date.now() + maxWaitMs
     let report = {}
     let pollFails = 0
