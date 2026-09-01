@@ -30,6 +30,7 @@ const audience = (process.env.INPUT_AUDIENCE || "").trim()
 const maxWaitMs = Math.max(120, Number(process.env.INPUT_MAX_WAIT_SECONDS || 1500)) * 1000
 const accountIndex = Math.min(5, Math.max(1, Number(process.env.INPUT_ACCOUNT_INDEX || 1)))
 const token = (process.env[`QWEN_JWT_${accountIndex}`] || "").trim()
+const inputChatId = (process.env.INPUT_CHAT_ID || "").trim()
 
 const t0 = Date.now()
 const log = (...a) => console.log(`[pod ${accountIndex} +${Math.round((Date.now() - t0) / 1000)}s]`, ...a)
@@ -434,5 +435,78 @@ async function runResearch() {
 process.on("uncaughtException", (e) => fail(500, `uncaught: ${e.message}`))
 process.on("unhandledRejection", (e) => fail(500, `unhandled rejection: ${e?.message ?? String(e)}`))
 
+// --- Modes ---------------------------------------------------------------------
+// HYBRID mode: the completions POST is IP-blocked from GitHub runners, but the
+// research STARTS server-side when a LOCAL machine (residential IP) fires it.
+// mode=collect: boot + login (GETs work from runners) + poll an EXISTING
+// chat_id until the report lands → download md/pdf → artifact.
+async function runCollect() {
+  try {
+    await bootPod()
+    // login: inject JWT; chats/new probe is not needed — but reuses loginPod's
+    // page-ready wait. Skip the create-chat verification by polling directly.
+    for (let i = 0; i < 20; i++) {
+      const href = await cdpEval("location.href").catch(() => null)
+      if (String(href ?? "").startsWith("https://chat.qwen.ai")) break
+      if (i === 19) fail(502, "page never reached https://chat.qwen.ai")
+      await sleep(2000)
+    }
+    await cdpEval(`localStorage.setItem('token', ${JSON.stringify(token)}); 'set'`)
+    await cdpEval("location.reload(); 'reloading'")
+    await sleep(6000)
+    log("collecting chat:", inputChatId)
+    const deadline = Date.now() + maxWaitMs
+    let report = {}
+    let pollFails = 0
+    let polls = 0
+    while (Date.now() < deadline) {
+      await sleep(15000)
+      polls++
+      try {
+        const chatJson = await qwenApi(`/api/v2/chats/${inputChatId}?direction=up&limit=10`, {}, "GET", 90000)
+        report = extractResearchReport(chatJson)
+        pollFails = 0
+        if (report.report) break
+        if (polls % 8 === 0) log(`poll ${polls}: no answer phase yet (${Math.round((deadline - Date.now()) / 60000)} min left)`)
+      } catch {
+        pollFails += 1
+        log(`poll fail ${pollFails}/3`)
+        if (pollFails >= 3) throw Object.assign(new Error("CDP/session lost mid-run (3 consecutive poll failures)"), { status: 502 })
+      }
+    }
+    if (!report.report) fail(504, `no report within max_wait_seconds (${maxWaitMs / 1000}s) — research may not have started (local fire failed?) or still running`)
+    mkdirSync(OUT_DIR, { recursive: true })
+    writeFileSync(`${OUT_DIR}/report.md`, report.report)
+    let mdBytes = Buffer.byteLength(report.report)
+    if (report.md_link) {
+      try { mdBytes = await downloadTo(report.md_link, `${OUT_DIR}/report.md`) }
+      catch (e) { log("md link download failed (kept extracted text):", e.message) }
+    }
+    let pdfBytes = 0
+    if (report.pdf_link) {
+      try { pdfBytes = await downloadTo(report.pdf_link, `${OUT_DIR}/report.pdf`) }
+      catch (e) { log("pdf link download failed:", e.message) }
+    }
+    const result = {
+      ok: true,
+      status: "DONE",
+      mode: "collect",
+      account_index: accountIndex,
+      chat_id: inputChatId,
+      message_id: report.message_id ?? null,
+      references_count: (report.references ?? []).length,
+      report_chars: report.report.length,
+      md_bytes: mdBytes,
+      pdf_bytes: pdfBytes,
+      elapsed_sec: Math.round((Date.now() - t0) / 1000),
+    }
+    writeFileSync(`${OUT_DIR}/result.json`, JSON.stringify(result, null, 2))
+    log("DONE:", JSON.stringify(result))
+  } catch (e) {
+    fail(e.status || 502, e.message)
+  }
+}
+
 if (mode === "spike") await runSpike()
+else if (mode === "collect") await runCollect()
 else await runResearch()

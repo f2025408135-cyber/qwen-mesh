@@ -42,6 +42,11 @@ on:
         required: false
         type: string
         default: '0'
+      chat_id:
+        description: 'HYBRID MODE: existing research chat id (mode=collect polls + collects it)'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: qwen-account-${{ github.event.inputs.account_index }}
@@ -87,6 +92,7 @@ jobs:
           INPUT_ACCOUNT_INDEX: ${{ github.event.inputs.account_index }}
           INPUT_MODE: ${{ github.event.inputs.mode }}
           INPUT_HEADED: ${{ github.event.inputs.headed }}
+          INPUT_CHAT_ID: ${{ github.event.inputs.chat_id }}
         run: |
           if [ "${{ github.event.inputs.headed }}" = "1" ]; then
             xvfb-run -a node runner/deep-research.mjs
