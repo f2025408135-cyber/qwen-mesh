@@ -24,7 +24,7 @@ const topic = (process.env.FIRE_TOPIC || "").trim()
 const focus = (process.env.FIRE_FOCUS || "").trim()
 const audience = (process.env.FIRE_AUDIENCE || "").trim()
 const accountIndex = Math.max(1, Number(process.env.FIRE_ACCOUNT_INDEX || 1))
-const fireCapMs = Math.max(30, Number(process.env.FIRE_CAP_SECONDS || 75)) * 1000
+const fireCapMs = Math.max(30, Number(process.env.FIRE_CAP_SECONDS || 300)) * 1000
 
 const die = (msg) => { console.log(JSON.stringify({ ok: false, error: msg })); process.exit(1) }
 const log = (...a) => console.log("[fire]", ...a)
