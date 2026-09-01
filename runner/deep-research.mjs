@@ -205,19 +205,25 @@ function extractResearchReport(chatJson) {
 
 // --- Chromium boot ------------------------------------------------------------
 function findChromium() {
-  const root = `${process.env.HOME}/.cache/ms-playwright`
-  if (!existsSync(root)) return null
+  const roots = [`${process.env.HOME}/.cache/ms-playwright`, `${process.env.HOME}/Library/Caches/ms-playwright`]
   const rels = [
-    "chrome-linux64/chrome",                                  // Chrome for Testing layout (playwright >= 1.53)
-    "chrome-linux/chrome",                                    // legacy playwright layout
-    "chrome-headless-shell-linux64/chrome-headless-shell",    // headless shell fallback
+    "chrome-linux64/chrome",                                  // Linux Chrome for Testing (playwright >= 1.53)
+    "chrome-linux/chrome",                                    // legacy playwright Linux layout
+    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",        // macOS Intel
+    "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",  // macOS Apple Silicon
+    "chrome-headless-shell-linux64/chrome-headless-shell",    // headless shell fallbacks
+    "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+    "chrome-headless-shell-mac64/chrome-headless-shell",
   ]
-  const dirs = readdirSync(root).filter((d) => d.startsWith("chromium"))
-  dirs.sort((a, b) => (b.includes("headless") ? -1 : 1) - (a.includes("headless") ? -1 : 1) || b.localeCompare(a))
-  for (const dir of dirs) {
-    for (const rel of rels) {
-      const bin = `${root}/${dir}/${rel}`
-      if (existsSync(bin)) return bin
+  for (const root of roots) {
+    if (!existsSync(root)) continue
+    const dirs = readdirSync(root).filter((d) => d.startsWith("chromium"))
+    dirs.sort((a, b) => (b.includes("headless") ? -1 : 1) - (a.includes("headless") ? -1 : 1) || b.localeCompare(a))
+    for (const dir of dirs) {
+      for (const rel of rels) {
+        const bin = `${root}/${dir}/${rel}`
+        if (existsSync(bin)) return bin
+      }
     }
   }
   return null

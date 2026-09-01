@@ -32,6 +32,11 @@ on:
         required: false
         type: string
         default: 'research'
+      os:
+        description: 'Runner OS — macos-latest uses GitHub macOS cloud IPs (NOT Azure; dodges IP-range blocks)'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
 
 concurrency:
   group: qwen-account-${{ github.event.inputs.account_index }}
@@ -39,7 +44,7 @@ concurrency:
 
 jobs:
   pod:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.os || 'ubuntu-latest' }}
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
@@ -51,8 +56,10 @@ jobs:
       - name: Cache chromium (playwright)
         uses: actions/cache@v4
         with:
-          path: ~/.cache/ms-playwright
-          key: qwen-mesh-chromium-v1
+          path: |
+            ~/.cache/ms-playwright
+            ~/Library/Caches/ms-playwright
+          key: qwen-mesh-chromium-v2
 
       - name: Install chromium
         run: npx -y playwright install --with-deps chromium
