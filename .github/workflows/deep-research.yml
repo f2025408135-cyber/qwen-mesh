@@ -85,6 +85,26 @@ jobs:
           QWEN_JWT_3: ${{ secrets.QWEN_JWT_3 }}
           QWEN_JWT_4: ${{ secrets.QWEN_JWT_4 }}
           QWEN_JWT_5: ${{ secrets.QWEN_JWT_5 }}
+          QWEN_JWT_6: ${{ secrets.QWEN_JWT_6 }}
+          QWEN_JWT_7: ${{ secrets.QWEN_JWT_7 }}
+          QWEN_JWT_8: ${{ secrets.QWEN_JWT_8 }}
+          QWEN_JWT_9: ${{ secrets.QWEN_JWT_9 }}
+          QWEN_JWT_10: ${{ secrets.QWEN_JWT_10 }}
+          QWEN_JWT_11: ${{ secrets.QWEN_JWT_11 }}
+          QWEN_JWT_12: ${{ secrets.QWEN_JWT_12 }}
+          QWEN_JWT_13: ${{ secrets.QWEN_JWT_13 }}
+          QWEN_JWT_14: ${{ secrets.QWEN_JWT_14 }}
+          QWEN_JWT_15: ${{ secrets.QWEN_JWT_15 }}
+          QWEN_JWT_16: ${{ secrets.QWEN_JWT_16 }}
+          QWEN_JWT_17: ${{ secrets.QWEN_JWT_17 }}
+          QWEN_JWT_18: ${{ secrets.QWEN_JWT_18 }}
+          QWEN_JWT_19: ${{ secrets.QWEN_JWT_19 }}
+          QWEN_JWT_20: ${{ secrets.QWEN_JWT_20 }}
+          QWEN_JWT_21: ${{ secrets.QWEN_JWT_21 }}
+          QWEN_JWT_22: ${{ secrets.QWEN_JWT_22 }}
+          QWEN_JWT_23: ${{ secrets.QWEN_JWT_23 }}
+          QWEN_JWT_24: ${{ secrets.QWEN_JWT_24 }}
+          QWEN_JWT_25: ${{ secrets.QWEN_JWT_25 }}
           INPUT_TOPIC: ${{ github.event.inputs.topic }}
           INPUT_FOCUS: ${{ github.event.inputs.focus }}
           INPUT_AUDIENCE: ${{ github.event.inputs.audience }}
