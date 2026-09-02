@@ -28,7 +28,7 @@ const topic = (process.env.INPUT_TOPIC || "").trim()
 const focus = (process.env.INPUT_FOCUS || "").trim()
 const audience = (process.env.INPUT_AUDIENCE || "").trim()
 const maxWaitMs = Math.max(120, Number(process.env.INPUT_MAX_WAIT_SECONDS || 1500)) * 1000
-const accountIndex = Math.min(5, Math.max(1, Number(process.env.INPUT_ACCOUNT_INDEX || 1)))
+const accountIndex = Math.min(25, Math.max(1, Number(process.env.INPUT_ACCOUNT_INDEX || 1)))
 const token = (process.env[`QWEN_JWT_${accountIndex}`] || "").trim()
 const inputChatId = (process.env.INPUT_CHAT_ID || "").trim()
 
