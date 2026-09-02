@@ -130,10 +130,44 @@ jobs:
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload artifact
-        if: always()
+      # Deliver the proprietary report to the PRIVATE repo (never public).
+      # Only runs when a report actually exists (research/collect modes success).
+      - name: Deliver to private repo
+        if: success() && hashFiles('out/report.md') != ''
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO_NAME: ${{ secrets.PRIVATE_REPO_NAME }}
+          ACCT_INDEX: ${{ github.event.inputs.account_index }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -e
+          if [ -z "$PRIVATE_REPO_TOKEN" ] || [ -z "$PRIVATE_REPO_NAME" ]; then
+            echo "::warning::PRIVATE_REPO_TOKEN/PRIVATE_REPO_NAME not set — skipping private delivery"
+            exit 0
+          fi
+          SLUG="${PRIVATE_REPO_NAME#*/}"
+          git config --global user.email "qwen-mesh@users.noreply.github.com"
+          git config --global user.name "qwen-mesh"
+          rm -rf ./qwen-research
+          git clone --quiet --depth 1 "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/${PRIVATE_REPO_NAME}.git" ./qwen-research
+          TS="$(date +%Y%m%d-%H%M%S)"
+          mkdir -p ./qwen-research/reports
+          cp "out/report.md" "./qwen-research/reports/qwen-research-${TS}-acct${ACCT_INDEX}.md"
+          if [ -f "out/report.pdf" ]; then
+            cp "out/report.pdf" "./qwen-research/reports/qwen-research-${TS}-acct${ACCT_INDEX}.pdf"
+          fi
+          cp "out/result.json" "./qwen-research/reports/qwen-research-${TS}-acct${ACCT_INDEX}.result.json"
+          cd ./qwen-research
+          git add reports/
+          git commit --quiet -m "deep research acct${ACCT_INDEX} run ${RUN_ID} @ ${TS}"
+          git push --quiet origin HEAD
+          echo "DELIVERED to private repo: reports/qwen-research-${TS}-acct${ACCT_INDEX}.md"
+
+      # Public artifact: metadata ONLY (result.json) — never the report body.
+      - name: Upload metadata artifact
+        if: always() && hashFiles('out/result.json') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: research-${{ github.run_id }}
-          path: out/
+          name: meta-${{ github.run_id }}
+          path: out/result.json
           retention-days: 30
