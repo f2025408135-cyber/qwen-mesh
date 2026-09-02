@@ -512,6 +512,36 @@ async function runCollect() {
   }
 }
 
+// AUTH-TEST: fastest possible account health check — login (JWT→localStorage)
+// + create a chat via chats/new (WAF-safe from runners; the completions endpoint
+// tarpits there, so it's NOT touched). Exit 0 = credential valid & WAF accepts.
+async function runAuthTest() {
+  try {
+    await bootPod()
+    for (let i = 0; i < 20; i++) {
+      const href = await cdpEval("location.href").catch(() => null)
+      if (String(href ?? "").startsWith("https://chat.qwen.ai")) break
+      if (i === 19) fail(502, "page never reached https://chat.qwen.ai")
+      await sleep(2000)
+    }
+    await cdpEval(`localStorage.setItem('token', ${JSON.stringify(token)}); 'set'`)
+    await cdpEval("location.reload(); 'reloading'")
+    await sleep(6000)
+    const chatId = await createChat()
+    const result = {
+      ok: true, status: "AUTH-OK", mode: "auth-test", account_index: accountIndex,
+      chat_id: chatId, elapsed_sec: Math.round((Date.now() - t0) / 1000),
+    }
+    mkdirSync(OUT_DIR, { recursive: true })
+    writeFileSync(`${OUT_DIR}/result.json`, JSON.stringify(result, null, 2))
+    log("AUTH-OK:", JSON.stringify(result))
+    process.exit(0)
+  } catch (e) {
+    fail(e.status || 502, e.message)
+  }
+}
+
 if (mode === "spike") await runSpike()
 else if (mode === "collect") await runCollect()
+else if (mode === "auth-test") await runAuthTest()
 else await runResearch()
