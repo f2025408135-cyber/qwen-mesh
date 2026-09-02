@@ -14,6 +14,12 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+# ensure GH_TOKEN for private-repo clone (fall back to gh auth token)
+if (-not $env:GH_TOKEN) {
+  try { $env:GH_TOKEN = (gh auth token 2>$null).Trim() } catch { }
+  if (-not $env:GH_TOKEN) { Write-Error "GH_TOKEN not set and gh not authenticated"; exit 1 }
+}
+
 # 1) fire locally
 $env:FIRE_TOPIC = $Topic
 $env:FIRE_FOCUS = $Focus
@@ -39,18 +45,33 @@ if (-not $Wait) { Write-Output "watch/download later: gh run watch $runId -R $Re
 # 3) wait + collect
 gh run watch $runId -R $Repo --exit-status --interval 20
 if ($LASTEXITCODE -ne 0) { Write-Error "collect run failed - check the run log"; exit 1 }
-$tmp = Join-Path $env:TEMP "qwen-mesh-$runId"
-gh run download $runId -R $Repo -n "research-$runId" -D $tmp
-$res = Get-Content (Join-Path $tmp "result.json") -Raw | ConvertFrom-Json
+
+# Pull the report from the PRIVATE repo (reports are never public).
+# The private repo stores reports/reports/qwen-research-<TS>-acct<N>.md.
+# We pull fresh and take the newest file for this account.
+$priv = "f2025408135-cyber/qwen-research"
+$tmp = Join-Path $env:TEMP "qwen-mesh-private-$runId"
+git clone --quiet --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/$priv.git" $tmp 2>$null
+$res = $null
+$mdSrc = $null; $pdfSrc = $null; $rjSrc = $null
+if (Test-Path $tmp) {
+  # newest file for this account
+  $pat = "*-acct$Account.*"
+  $acctFiles = Get-ChildItem (Join-Path $tmp "reports") -Filter "*acct$Account.*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+  $mdSrc = $acctFiles | Where-Object { $_.Extension -eq ".md" } | Select-Object -First 1
+  $pdfSrc = $acctFiles | Where-Object { $_.Extension -eq ".pdf" } | Select-Object -First 1
+  $rjSrc = $acctFiles | Where-Object { $_.Extension -eq ".result.json" } | Select-Object -First 1
+  if ($rjSrc) { $res = Get-Content $rjSrc.FullName -Raw | ConvertFrom-Json }
+}
+if (-not $mdSrc) { Write-Error "No report found in private repo for account $Account"; exit 1 }
 
 # 4) save per the qwen-deepresearch save protocol + verify
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $ts = Get-Date -Format "yyyyMMdd-HHmmss"
 $mdPath = Join-Path $OutDir "qwen-research-$ts.md"
-Copy-Item (Join-Path $tmp "report.md") $mdPath -Force
-$pdfSrc = Join-Path $tmp "report.pdf"
+Copy-Item $mdSrc.FullName $mdPath -Force
 $pdfPath = "n/a"
-if (Test-Path $pdfSrc) { $pdfPath = Join-Path $OutDir "qwen-research-$ts.pdf"; Copy-Item $pdfSrc $pdfPath -Force }
+if ($pdfSrc) { $pdfPath = Join-Path $OutDir "qwen-research-$ts.pdf"; Copy-Item $pdfSrc.FullName $pdfPath -Force }
 $head = (Get-Content $mdPath -TotalCount 1)
 $bytes = (Get-Item $mdPath).Length
 Write-Output ""

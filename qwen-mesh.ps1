@@ -23,6 +23,23 @@ param(
 function Fail($msg) { Write-Error $msg; exit 1 }
 function Log($msg) { Write-Output "[qwen-mesh] $msg" }
 
+# Pull the newest report for an account from the PRIVATE repo (reports never public).
+# Returns a hashtable { md, pdf, result } file paths, or $null if not found.
+function Get-PrivateReport([int]$acct) {
+  $priv = "f2025408135-cyber/qwen-research"
+  if (-not $env:GH_TOKEN) { try { $env:GH_TOKEN = (gh auth token 2>$null).Trim() } catch { } }
+  $tmp = Join-Path $env:TEMP "qwen-mesh-pull-$acct"
+  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  git clone --quiet --depth 1 "https://x-access-token:$env:GH_TOKEN@github.com/$priv.git" $tmp 2>$null
+  if (-not (Test-Path (Join-Path $tmp "reports"))) { return $null }
+  $files = Get-ChildItem (Join-Path $tmp "reports") -Filter "*acct$acct.*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+  $md = $files | Where-Object { $_.Extension -eq ".md" } | Select-Object -First 1
+  $pdf = $files | Where-Object { $_.Extension -eq ".pdf" } | Select-Object -First 1
+  $rj = $files | Where-Object { $_.Extension -eq ".result.json" } | Select-Object -First 1
+  if (-not $md) { return $null }
+  return @{ md = $md.FullName; pdf = $pdf.FullName; result = $rj.FullName; dir = $tmp }
+}
+
 # --- validate inputs ---
 $hasWave = $Wave -and $Wave.Count -gt 0
 if (-not $Topic -and -not $hasWave) { Fail "Provide a topic or -Wave @('t1','t2')" }
@@ -116,18 +133,18 @@ function Run-Single($topicText, $acct) {
   gh run watch $runId -R $Repo --exit-status --interval 20
   if ($LASTEXITCODE -ne 0) { Fail "collect run failed" }
 
-  # download
-  $tmp = "$env:TEMP\qwen-mesh-$runId"
-  gh run download $runId -R $Repo -n "research-$runId" -D $tmp 2>$null
-  $res = Get-Content "$tmp\result.json" -Raw | ConvertFrom-Json
+  # download from PRIVATE repo
+  $rep = Get-PrivateReport $acct
+  if (-not $rep) { Fail "no report in private repo for account $acct" }
+  if ($rep.result) { $res = Get-Content $rep.result -Raw | ConvertFrom-Json }
 
   # save
   New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
   $ts = Get-Date -Format "yyyyMMdd-HHmmss"
   $mdDst = "$OutDir\qwen-research-$ts.md"
   $pdfDst = "$OutDir\qwen-research-$ts.pdf"
-  Copy-Item "$tmp\report.md" $mdDst -Force
-  if (Test-Path "$tmp\report.pdf") { Copy-Item "$tmp\report.pdf" $pdfDst -Force }
+  Copy-Item $rep.md $mdDst -Force
+  if ($rep.pdf) { Copy-Item $rep.pdf $pdfDst -Force }
 
   # verify
   $head = Get-Content $mdDst -TotalCount 1
@@ -192,23 +209,25 @@ function Run-Wave($topics, $startAcct) {
     gh run watch $runId -R $Repo --exit-status --interval 20 2>$null
   }
 
-  # download all
+  # download all (from PRIVATE repo)
   New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
   $ts = Get-Date -Format "yyyyMMdd-HHmmss"
   $idx = 0
   foreach ($runId in $runs) {
     $idx++
-    $tmp = "$env:TEMP\qwen-mesh-$runId"
-    gh run download $runId -R $Repo -n "research-$runId" -D $tmp 2>$null
-    if (Test-Path "$tmp\result.json") {
-      $res = Get-Content "$tmp\result.json" -Raw | ConvertFrom-Json
+    $acctForRun = $chatIds[$idx-1].acct
+    $rep = Get-PrivateReport $acctForRun
+    if ($rep) {
+      if ($rep.result) { $res = Get-Content $rep.result -Raw | ConvertFrom-Json }
       $safeTopic = ($chatIds[$idx-1].topic -replace '[^a-zA-Z0-9]','-').Substring(0, [Math]::Min(40, $chatIds[$idx-1].topic.Length))
       $mdDst = "$OutDir\qwen-research-$safeTopic-$ts.md"
-      Copy-Item "$tmp\report.md" $mdDst -Force
-      if (Test-Path "$tmp\report.pdf") { Copy-Item "$tmp\report.pdf" "$OutDir\qwen-research-$safeTopic-$ts.pdf" -Force }
+      Copy-Item $rep.md $mdDst -Force
+      if ($rep.pdf) { Copy-Item $rep.pdf "$OutDir\qwen-research-$safeTopic-$ts.pdf" -Force }
       $head = Get-Content $mdDst -TotalCount 1
       $bytes = (Get-Item $mdDst).Length
       Log "WAVE $idx/$($runs.Count): $safeTopic -> $bytes bytes, $($res.references_count) refs"
+    } else {
+      Log "WAVE $idx/$($runs.Count): NO REPORT in private repo for acct $acctForRun"
     }
   }
   Write-Output ""
