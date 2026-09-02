@@ -33,6 +33,23 @@ Task JSON: `{"script": "<python code>"}` (in-process exec, ZeroGPU-safe) or
 `{"gpu": true}` (GPU probe). Shell commands via subprocess are DISABLED on
 ZeroGPU (event-loop deadlock) - use in-process python only.
 
+## Free tier reality (researched 2026-09-02 - official docs + field-verified)
+
+**You CANNOT create a free CPU-only Space**:
+- Official docs: "Gradio and Docker Spaces run on compute and require a paid
+  plan to create: PRO for personal accounts... Free personal accounts in good
+  standing can still host up to 2 Gradio Spaces running on ZeroGPU."
+- CPU Basic is $0/hour but PRO-gated at creation (API 402).
+- HF Jobs/Sandboxes require pre-paid credits (402).
+
+**THE FREE-CPU STRATEGY (use this)**:
+- ZeroGPU quota is charged **per @spaces.GPU function-second** ONLY. CPU-only
+  work is FREE and unlimited.
+- `run_task` script/agent paths = pure CPU (verified: 30M loop in 2.84 s).
+- Keep GPU work minimal: `@spaces.GPU(duration=30)` probes use a sub-second
+  slice. Never wrap CPU work in @spaces.GPU.
+- So the SAME space is: free CPU node (unlimited) + occasional free GPU.
+
 ## What was learned (painful, 2026-09-02)
 
 1. HF Spaces free tier: **ZeroGPU is the only free hardware** for new spaces
@@ -44,5 +61,7 @@ ZeroGPU (event-loop deadlock) - use in-process python only.
 4. Gradio 6 API = `/gradio_api/call/<fn>` queue protocol (NOT `/run/predict`).
 5. No `subprocess` inside @spaces.GPU (asyncio crash) - use in-process exec().
 6. ASCII-only source (HF runtime charset is charmap on some paths).
-7. Private spaces need the signed iframe URL - direct requests 404.
+7. Private spaces: use `Authorization: Bearer hf_...` (200 works) - the signed
+   iframe URL is NOT needed (verified 2026-09-02).
 8. ZeroGPU sleeps on idle; first request wakes it (~10-30s).
+9. ZeroGPU quota ~3.5 GPU-min/day free (PRO 8x); CPU work does NOT consume it.

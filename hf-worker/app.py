@@ -30,9 +30,10 @@ def _exec_python(code: str) -> dict:
     return {"ok": not err.strip() or "Traceback" not in err, "stdout": buf.getvalue()[-8000:], "stderr": err[-4000:]}
 
 
-@spaces.GPU
+@spaces.GPU(duration=30)
 def _gpu_probe() -> str:
-    """ZeroGPU requires a @spaces.GPU entrypoint. Probe GPU availability."""
+    """ZeroGPU requires a @spaces.GPU entrypoint. Probe GPU availability.
+    duration=30 keeps the quota cost tiny (sub-second real GPU use)."""
     try:
         import torch
         return json.dumps({"gpu": torch.cuda.is_available(),
