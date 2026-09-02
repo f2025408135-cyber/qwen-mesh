@@ -1,0 +1,32 @@
+name: hf-keepalive
+
+on:
+  schedule:
+    - cron: "0 */10 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping HF ZeroGPU space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            https://oxmoiz-qwen-mesh-agent.hf.space/)
+          echo "space ping: $code"
+          [ "$code" = "200" ] || { echo "SPACE NOT ALIVE (code $code)"; exit 1; }
+
+      - name: Warm the app (cold-start wake)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          curl -s -o /dev/null -H "Authorization: Bearer $HF_TOKEN" \
+            https://oxmoiz-qwen-mesh-agent.hf.space/config || true
+          sleep 15
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            https://oxmoiz-qwen-mesh-agent.hf.space/)
+          echo "after warm: $code"
