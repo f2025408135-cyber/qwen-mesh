@@ -7,7 +7,7 @@ on:
         description: "Task for the coding agent (runs on the HF space, independent of your PC)"
         required: true
         default: "Summarize the repo layout of services/remote-mesh and list 3 improvements."
-engine:
+      engine:
         description: "opencode | swarm | pi | codex | project"
         required: false
         default: "opencode"
