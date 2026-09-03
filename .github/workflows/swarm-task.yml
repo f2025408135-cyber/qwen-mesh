@@ -1,0 +1,39 @@
+name: swarm-task
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task for the codex+pi swarm (1 codex orchestrator, 5 pi workers)"
+        required: true
+        default: "Write a 5-section markdown brief about ZeroGPU economics."
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch swarm to HF ZeroGPU space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TASK: "${{ github.event.inputs.task }}"
+        run: |
+          SPACE="https://oxmoiz-qwen-mesh-agent.hf.space"
+          TASK_JSON=$(jq -n --arg t "$TASK" '{swarm: {task: $t, workers: 5, worker_timeout: 240, phase_timeout: 300}}')
+          BODY=$(jq -n --argjson d "$TASK_JSON" '{data: [$d | tojson], event_data: null}')
+
+          eid=$(curl -s -X POST "$SPACE/gradio_api/call/run_task" \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" | jq -r '.event_id')
+
+          [ "$eid" != "null" ] && [ -n "$eid" ] || { echo "SUBMIT FAILED"; exit 1; }
+          echo "event: $eid"
+
+          curl -s -N --max-time 900 \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            "$SPACE/gradio_api/call/run_task/$eid" > stream.txt || true
+
+          out=$(grep '^data: ' stream.txt | grep -v '^data: null' | tail -1 | sed 's/^data: //' | jq -r '.[0] | fromjson | .final // empty' 2>/dev/null || echo "")
+          [ -n "$out" ] || { echo "SWARM FAILED"; echo "--- raw ---"; cat stream.txt | tail -5; exit 1; }
+          echo "=== swarm final output ==="
+          echo "$out"

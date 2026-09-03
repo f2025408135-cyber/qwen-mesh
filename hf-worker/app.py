@@ -19,6 +19,245 @@ HERMES_ROOT = os.environ.get("HERMES_ROOT", os.path.expanduser("~/.hermes-agent"
 HERMES_BIN = os.path.join(HERMES_ROOT, "bin", "hermes")
 _hermes_lock = threading.Lock()
 
+# --- codex + pi agent swarm (1 codex orchestrator under 5 pi rust workers) ---
+AGENT_BIN = os.path.expanduser("~/.agent-bin")
+CODEX_BIN = os.path.join(AGENT_BIN, "codex")
+PI_BIN = os.path.join(AGENT_BIN, "pi")
+CODEX_HOME = os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex-space"))
+PI_HOME = os.environ.get("PI_HOME", os.path.expanduser("~/.pi-space"))
+SWARM_ROOT = os.path.expanduser("~/swarm")
+CODEX_VERSION = "rust-v0.92.0"  # last era with wire_api="chat" (removed Feb 2026, PR #10157)
+CODEX_URL = f"https://github.com/openai/codex/releases/download/{CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz"
+PI_URL = "https://github.com/badlogic/pi-mono/releases/latest/download/pi-linux-x64.tar.gz"
+_swarm_lock = threading.Lock()
+
+
+def _gemini_keys() -> list:
+    """Rotating key pool: GEMINI_KEYS secret (csv) falls back to GEMINI_API_KEY/LLM_KEY."""
+    raw = os.environ.get("GEMINI_KEYS", "") or os.environ.get("GEMINI_API_KEY", "") \
+        or os.environ.get("LLM_KEY", "")
+    return [k.strip() for k in raw.split(",") if k.strip()] or [""]
+
+
+def _ensure_swarm_binaries(log) -> None:
+    """Download codex + pi linux binaries once per container (cached in FS)."""
+    import glob as _glob
+    global PI_BIN
+    os.makedirs(AGENT_BIN, exist_ok=True)
+    with _swarm_lock:
+        stamp = os.path.join(AGENT_BIN, "codex-version.txt")
+        need_codex = not os.path.exists(CODEX_BIN)
+        if os.path.exists(stamp):
+            with open(stamp) as f:
+                need_codex = need_codex or f.read().strip() != CODEX_VERSION
+        if need_codex:
+            log.append(f"codex: downloading {CODEX_VERSION}...")
+            d = os.path.join(AGENT_BIN, "_codex")
+            os.makedirs(d, exist_ok=True)
+            r = subprocess.run(["bash", "-c", f"curl -sL '{CODEX_URL}' | tar -xz -C '{d}'"],
+                               capture_output=True, text=True, timeout=300)
+            hits = _glob.glob(os.path.join(d, "**", "codex*"), recursive=True)
+            hits = [h for h in hits if os.path.isfile(h)]
+            if not hits:
+                raise RuntimeError("codex dl failed: " + (r.stderr or "")[-200:])
+            shutil_move(hits[0], CODEX_BIN)
+            os.chmod(CODEX_BIN, 0o755)
+            with open(stamp, "w") as f:
+                f.write(CODEX_VERSION)
+            log.append("codex: installed")
+        if not os.path.exists(PI_BIN):
+            log.append("pi: downloading release binary...")
+            d = os.path.join(AGENT_BIN, "_pi")
+            import shutil as _sh
+            _sh.rmtree(d, ignore_errors=True)
+            os.makedirs(d, exist_ok=True)
+            r = subprocess.run(["bash", "-c", f"curl -sL '{PI_URL}' | tar -xz -C '{d}'"],
+                               capture_output=True, text=True, timeout=300)
+            # tarball layout: pi/pi (bun exe) + pi/theme/*.json siblings -
+            # keep the tree intact (bun exe resolves theme/ relative to itself)
+            hits = [h for h in _glob.glob(os.path.join(d, "**", "pi"), recursive=True)
+                    if os.path.isfile(h)]
+            if not hits:
+                raise RuntimeError("pi dl failed: " + (r.stderr or "")[-200:])
+            os.chmod(hits[0], 0o755)
+            PI_BIN = hits[0]
+            log.append("pi: installed at " + hits[0])
+        # codex config: speaks Responses API to local LiteLLM bridge -> native gemini
+        # (Gemini's OpenAI-compat endpoint rejects codex tool schemas; LiteLLM
+        # translates properly. chat wire was removed from codex in Feb 2026.)
+        os.makedirs(CODEX_HOME, exist_ok=True)
+        cfg = os.path.join(CODEX_HOME, "config.toml")
+        with open(cfg, "w") as f:
+            f.write('model_provider = "litellm"\n'
+                    'model = "gemini-2.5-flash"\n'
+                    'approval_policy = "never"\n'
+                    'sandbox_mode = "danger-full-access"\n'
+                    '[model_providers.litellm]\n'
+                    'name = "LiteLLM bridge -> native gemini"\n'
+                    'base_url = "http://127.0.0.1:4000/v1"\n'
+                    'env_key = "GEMINI_API_KEY"\n'
+                    'wire_api = "responses"\n')
+
+
+LITELLM_YAML = os.path.join(AGENT_BIN, "litellm.yaml")
+_litellm_proc = None
+
+
+def _ensure_litellm(log) -> None:
+    """Start the LiteLLM responses->gemini bridge on 127.0.0.1:4000 (cached)."""
+    global _litellm_proc
+    import urllib.request as _u
+    with _swarm_lock:
+        alive = False
+        if _litellm_proc is not None and _litellm_proc.poll() is None:
+            alive = True
+        else:
+            try:
+                with _u.urlopen("http://127.0.0.1:4000/health/liveliness", timeout=3) as r:
+                    alive = r.status == 200
+            except Exception:
+                alive = False
+        if alive:
+            return
+        # ensure dependency (proxy extra needed for the /v1/responses server)
+        try:
+            import backoff  # noqa: F401  (proxy-only dep)
+            import litellm  # noqa: F401
+        except Exception:
+            log.append("litellm: pip installing proxy extra...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "litellm[proxy]"],
+                           capture_output=True, text=True, timeout=900)
+        os.makedirs(AGENT_BIN, exist_ok=True)
+        with open(LITELLM_YAML, "w") as f:
+            f.write('model_list:\n'
+                    '  - model_name: gemini-2.5-flash\n'
+                    '    litellm_params:\n'
+                    '      model: gemini/gemini-2.5-flash\n'
+                    '      api_key: os.environ/GEMINI_API_KEY\n')
+        env = dict(os.environ)
+        env["GEMINI_API_KEY"] = _gemini_keys()[0]
+        import shutil as _shutil
+        litellm_exe = _shutil.which("litellm") or "/usr/local/bin/litellm"
+        logf = open(os.path.join(AGENT_BIN, "litellm.log"), "w")
+        _litellm_proc = subprocess.Popen(
+            [litellm_exe, "--config", LITELLM_YAML, "--port", "4000"],
+            stdout=logf, stderr=subprocess.STDOUT, env=env,
+            start_new_session=True)
+        # wait for readiness
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                with _u.urlopen("http://127.0.0.1:4000/health/liveliness", timeout=3) as r:
+                    if r.status == 200:
+                        log.append("litellm: bridge ready on :4000")
+                        return
+            except Exception:
+                time.sleep(2)
+        raise RuntimeError("litellm bridge did not become ready in 120s")
+
+
+def shutil_move(src: str, dst: str) -> None:
+    import shutil
+    shutil.move(src, dst)
+
+
+def run_codex(prompt: str, timeout: int, log: list) -> dict:
+    """One-shot codex exec (orchestrator). Speaks Responses API via LiteLLM."""
+    _ensure_swarm_binaries(log)
+    _ensure_litellm(log)
+    out = os.path.join(SWARM_ROOT, "codex-last.txt")
+    os.makedirs(SWARM_ROOT, exist_ok=True)
+    env = dict(os.environ)
+    env.update({"CODEX_HOME": CODEX_HOME, "GEMINI_API_KEY": _gemini_keys()[0]})
+    args = [CODEX_BIN, "exec", "--skip-git-repo-check", "--output-last-message", out, prompt]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env,
+                           cwd=SWARM_ROOT)
+        last = ""
+        if os.path.exists(out):
+            with open(out) as f:
+                last = f.read()
+        return {"ok": r.returncode == 0, "stdout": (last or r.stdout or "")[-8000:],
+                "stderr": (r.stderr or "")[-1500:], "exit": r.returncode}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"codex timeout > {timeout}s"}
+
+
+def run_pi(prompt: str, timeout: int, api_key: str, workdir: str, log: list) -> dict:
+    """One-shot pi (rust) worker in print mode."""
+    _ensure_swarm_binaries(log)
+    os.makedirs(workdir, exist_ok=True)
+    env = dict(os.environ)
+    env.update({"HOME": os.path.expanduser("~"), "PI_HOME": PI_HOME})
+    args = [PI_BIN, "--provider", "google", "--model", "gemini-2.5-flash",
+            "--api-key", api_key, "--mode", "text", "--no-session", "-p", prompt]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env,
+                           cwd=workdir)
+        return {"ok": r.returncode == 0, "stdout": (r.stdout or "")[-6000:],
+                "stderr": (r.stderr or "")[-1500:], "exit": r.returncode}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"pi timeout > {timeout}s"}
+
+
+def run_swarm(sconf: dict, t0: float) -> dict:
+    """1 codex orchestrator -> N pi rust workers -> codex review."""
+    log = []
+    task = str(sconf.get("task", "")).strip()
+    n_workers = min(max(int(sconf.get("workers", 5)), 1), 8)
+    w_timeout = int(sconf.get("worker_timeout", 240))
+    phase_timeout = int(sconf.get("phase_timeout", 240))
+    if not task:
+        return {"ok": False, "error": "swarm.task required"}
+    keys = _gemini_keys()
+    os.makedirs(SWARM_ROOT, exist_ok=True)
+    for i in range(n_workers):
+        os.makedirs(os.path.join(SWARM_ROOT, f"worker-{i}"), exist_ok=True)
+
+    # Phase 1: codex decomposes into JSON array of subtasks
+    plan_prompt = (
+        "You are the orchestrator. Decompose this task into exactly "
+        f"{n_workers} INDEPENDENT subtasks. Reply with ONLY a JSON array of "
+        f"{n_workers} strings, no prose, no code fences. Task: {task}")
+    p1 = run_codex(plan_prompt, phase_timeout, log)
+    plan = p1.get("stdout", "")
+    subtasks = []
+    import re as _re
+    m = _re.search(r"\[[\s\S]*\]", plan)
+    if m:
+        try:
+            subtasks = json.loads(m.group(0))
+        except Exception:
+            subtasks = []
+    if not isinstance(subtasks, list) or not subtasks:
+        subtasks = [task]
+        log.append("plan: codex JSON parse failed -> single task fallback")
+    subtasks = (subtasks + [task] * n_workers)[:n_workers]
+    log.append(f"plan: {len(subtasks)} subtasks")
+
+    # Phase 2: pi workers in parallel (staggered 8s, rotating keys)
+    results = [None] * len(subtasks)
+    def _worker(i, st):
+        key = keys[i % len(keys)]
+        if len(keys) > 1:
+            time.sleep(8 * (i % len(keys)))  # spread per-key RPM
+        results[i] = run_pi(st, w_timeout, key, os.path.join(SWARM_ROOT, f"worker-{i}"), log)
+    threads = [threading.Thread(target=_worker, args=(i, st)) for i, st in enumerate(subtasks)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    log.append(f"workers: {sum(1 for r in results if r and r.get('ok'))}/{len(subtasks)} ok")
+
+    # Phase 3: codex reviews + merges
+    merged = "\n\n".join(f"--- worker-{i} ---\n{r.get('stdout', '') if r else '(crashed)'}"
+                         for i, r in enumerate(results))
+    review_prompt = ("Merge the following worker outputs into one final deliverable "
+                     f"for the task: {task}\n\n{merged}\n\nReply with the merged result only.")
+    p3 = run_codex(review_prompt, phase_timeout, log)
+    return {"ok": all(r.get("ok") for r in results if r) and p3.get("ok", False),
+            "subtasks": subtasks, "worker_results": results,
+            "final": p3.get("stdout", "")[-8000:], "bootstrap_log": log,
+            "elapsed": round(time.time() - t0, 2)}
+
 
 def _exec_python(code: str) -> dict:
     """Run python code in-process, capturing stdout (ZeroGPU-safe)."""
@@ -226,6 +465,22 @@ def run_task(task_json: str) -> str:
         if task.get("gpu"):
             return json.dumps({"ok": True, "result": json.loads(_gpu_probe()),
                                "elapsed": round(time.time() - t0, 2)})
+        if "swarm" in task:
+            return json.dumps(run_swarm(task["swarm"], t0))
+        if "codex" in task:
+            _ensure_swarm_binaries([])
+            r = run_codex(str(task["codex"].get("prompt", "")),
+                          int(task["codex"].get("timeout", 240)), [])
+            r["elapsed"] = round(time.time() - t0, 2)
+            return json.dumps(r)
+        if "pi" in task:
+            _ensure_swarm_binaries([])
+            keys = _gemini_keys()
+            r = run_pi(str(task["pi"].get("prompt", "")),
+                       int(task["pi"].get("timeout", 240)),
+                       keys[0], os.path.join(SWARM_ROOT, "single-pi"), [])
+            r["elapsed"] = round(time.time() - t0, 2)
+            return json.dumps(r)
         if "agent" in task:
             return json.dumps(run_agent(task["agent"], t0))
         if "hermes" in task:
