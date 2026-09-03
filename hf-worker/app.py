@@ -115,6 +115,7 @@ def run_hermes(hconf: dict, t0: float) -> dict:
     prompt = str(hconf.get("prompt", ""))
     timeout = int(hconf.get("timeout", 120))
     model = str(hconf.get("model", ""))
+    provider = str(hconf.get("provider", ""))
     api_key = os.environ.get("LLM_KEY", "")
     api_base = os.environ.get("LLM_BASE_URL", "")
     api_provider = os.environ.get("LLM_PROVIDER", "openai")
@@ -136,27 +137,44 @@ def run_hermes(hconf: dict, t0: float) -> dict:
         "LLM_PROVIDER": api_provider,
         "HERMES_HOME": os.path.join(HERMES_ROOT, "home"),
     })
+    # hermes 0.21 has a NATIVE gemini provider (agent/gemini_native_adapter.py) -
+    # Google's OpenAI-compat endpoint 404s on hermes multi-turn, so the native
+    # path is canonical. Key comes from GEMINI_API_KEY (falls back to LLM_KEY).
+    if not env.get("GEMINI_API_KEY"):
+        env["GEMINI_API_KEY"] = api_key
+    if not env.get("GOOGLE_API_KEY"):
+        env["GOOGLE_API_KEY"] = api_key
     if model:
         env["HERMES_MODEL"] = model
 
     args = [HERMES_BIN]
     if cmd == "run":
-        args += ["run", prompt, "--non-interactive", "--no-stream"]
-    elif cmd == "memory":
-        args += ["memory"] + prompt.split()
-    elif cmd == "skills":
-        args += ["skills"] + prompt.split()
-    elif cmd == "cron":
-        args += ["cron"] + prompt.split()
+        # hermes 0.21: one-shot = `hermes -z "prompt" --cli` (no TUI)
+        args += ["-z", prompt, "--cli"]
     elif cmd == "delegate":
-        args += ["run", prompt, "--non-interactive", "--no-stream", "--toolset", "delegate"]
+        args += ["-z", prompt, "--cli", "-t", "delegate"]
+    elif cmd in ("chat", "config", "secrets", "login", "auth", "setup", "doctor",
+                 "sync", "backup", "status", "checkpoints", "curator", "journey",
+                 "memory-graph", "tools", "computer-use", "mcp", "sessions",
+                 "insights", "monitoring", "claw", "update", "uninstall", "acp",
+                 "profile", "completion", "dashboard", "serve", "desktop", "gui",
+                 "logs", "prompt-size", "import", "import-agent", "browser",
+                 "worktree", "model", "moa", "fallback", "migrate", "gateway",
+                 "proxy", "lsp", "whatsapp", "whatsapp-cloud", "slack", "send",
+                 "logout", "pause", "resume", "webhook", "peer", "portal",
+                 "kanban", "project", "hooks", "verify", "security", "approvals",
+                 "dump", "debug", "console", "pairing", "bundles", "plugins",
+                 "egress", "learning"):
+        # subcommand passthrough: hermes <cmd> <args>
+        args += [cmd] + prompt.split()
     else:
-        args += ["run", prompt, "--non-interactive", "--no-stream"]
+        # memory / skills / cron with sub-args
+        args += [cmd] + prompt.split()
 
     if model:
-        args += ["--model", model]
-    if timeout:
-        args += ["--timeout", str(timeout)]
+        args += ["-m", model]
+    if provider:
+        args += ["--provider", provider]
 
     log.append("cmd: " + " ".join(args[:5]) + "...")
     try:
@@ -272,6 +290,7 @@ with gr.Blocks(title="qwen-mesh-agent worker") as demo:
     )
     run_btn = gr.Button("Run")
     output = gr.Textbox(label="result", lines=12)
-    run_btn.click(run_task, inputs=task_input, outputs=output)
+    run_btn.click(run_task, inputs=task_input, outputs=output, concurrency_limit=8)
 
-demo.queue().launch()
+# Zero a10g = 2 vCPU / 16GB RAM: ~4-5 parallel light hermes runs is realistic.
+demo.queue(default_concurrency_limit=8).launch()

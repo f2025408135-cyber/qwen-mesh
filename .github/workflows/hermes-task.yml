@@ -1,0 +1,52 @@
+name: hermes-task
+
+on:
+  schedule:
+    - cron: "30 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Task prompt for the Hermes agent"
+        required: true
+        default: "Reply with exactly: HERMES-OK"
+      model:
+        description: "Model id (gemini native provider)"
+        required: false
+        default: "gemini-2.5-flash"
+      timeout:
+        description: "Per-task timeout in seconds"
+        required: false
+        default: "300"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch hermes task to HF ZeroGPU space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PROMPT: ${{ github.event.inputs.prompt || 'Reply with exactly: HERMES-OK' }}
+          MODEL: ${{ github.event.inputs.model || 'gemini-2.5-flash' }}
+          TASK_TIMEOUT: ${{ github.event.inputs.timeout || '300' }}
+        run: |
+          SPACE="https://oxmoiz-qwen-mesh-agent.hf.space"
+          TASK=$(jq -n --arg p "$PROMPT" --arg m "$MODEL" --arg t "$TASK_TIMEOUT" \
+            '{hermes: {cmd: "run", prompt: $p, model: $m, timeout: ($t | tonumber), provider: "gemini"}}')
+          BODY=$(jq -n --argjson d "$TASK" '{data: [$d | tojson], event_data: null}')
+
+          eid=$(curl -s -X POST "$SPACE/gradio_api/call/run_task" \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" | jq -r '.event_id')
+
+          [ "$eid" != "null" ] && [ -n "$eid" ] || { echo "SUBMIT FAILED"; exit 1; }
+          echo "event: $eid"
+
+          curl -s -N --max-time $((TASK_TIMEOUT + 120)) \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            "$SPACE/gradio_api/call/run_task/$eid" > stream.txt || true
+
+          out=$(grep '^data: ' stream.txt | grep -v '^data: null' | tail -1 | sed 's/^data: //' | jq -r '.[0] | fromjson | .stdout // empty' 2>/dev/null || echo "")
+          [ -n "$out" ] || { echo "NO RESULT"; echo "--- raw stream ---"; cat stream.txt; exit 1; }
+          echo "=== hermes output ==="
+          echo "$out"
