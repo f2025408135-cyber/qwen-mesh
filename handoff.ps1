@@ -2,24 +2,47 @@
 # Usage:
 #   .\handoff.ps1 -Task "Fix the failing test in services/foo and run the suite"
 #   .\handoff.ps1 -Task "..." -Engine swarm      # 1 codex + 5 opencode workers
+#   .\handoff.ps1 -Task "..." -Project myproj    # FULL project context: syncs
+#                                                # projects/myproj, agent codes
+#                                                # inside it, pushes branch back
 #   .\handoff.ps1 -Task "..." -Wait              # tail the run before shutting down
 #
 # The task runs on the HF ZeroGPU space (own datacenter internet, 16 vCPU / 97GB),
 # driven by GitHub Actions - your PC can be OFF the whole time.
-# Result lands in the PRIVATE repo: qwen-research/handoffs/ + the Actions log.
+# Result lands in the PRIVATE repo: qwen-research/handoffs/ (+ pushed branch in
+# project mode) and the Actions log.
 
 param(
   [Parameter(Mandatory = $true)][string]$Task,
-  [ValidateSet("opencode", "swarm", "pi", "codex")][string]$Engine = "opencode",
+  [ValidateSet("opencode", "swarm", "pi", "codex", "project")][string]$Engine = "opencode",
+  [string]$Project = "",
+  [string]$Dir = "",
+  [string]$Branch = "",
   [switch]$Wait
 )
 
 $Repo = "f2025408135-cyber/qwen-mesh"
 
 Write-Host "[handoff] engine=$Engine" -ForegroundColor Cyan
+
+if ($Project) {
+  $Engine = "project"
+  $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+  if ($Dir) {
+    Write-Host "[handoff] syncing '$Dir' -> projects/$Project ..." -ForegroundColor Cyan
+    & (Join-Path $here "sync-project.ps1") -Dir $Dir -Name $Project
+    if ($LASTEXITCODE -ne 0) { Write-Host "[handoff] sync FAILED" -ForegroundColor Red; exit 1 }
+  } else {
+    Write-Host "[handoff] project mode: projects/$Project (already synced - use -Dir to re-sync)" -ForegroundColor Cyan
+  }
+}
+
 Write-Host "[handoff] dispatching task to cloud..." -ForegroundColor Cyan
 
-gh workflow run handoff-task.yml -R $Repo -f task="$Task" -f engine="$Engine"
+$dispatch = @("workflow", "run", "handoff-task.yml", "-R", $Repo, "-f", "task=$Task", "-f", "engine=$Engine")
+if ($Project) { $dispatch += @("-f", "project=$Project") }
+if ($Branch)  { $dispatch += @("-f", "branch=$Branch") }
+gh @dispatch
 if ($LASTEXITCODE -ne 0) { Write-Host "[handoff] dispatch FAILED" -ForegroundColor Red; exit 1 }
 
 Start-Sleep -Seconds 8

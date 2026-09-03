@@ -7,11 +7,18 @@ on:
         description: "Task for the coding agent (runs on the HF space, independent of your PC)"
         required: true
         default: "Summarize the repo layout of services/remote-mesh and list 3 improvements."
-      engine:
-        description: "opencode | swarm | pi | codex"
+engine:
+        description: "opencode | swarm | pi | codex | project"
         required: false
         default: "opencode"
-
+      project:
+        description: "Project name under projects/ in the private repo (project mode only)"
+        required: false
+        default: ""
+      branch:
+        description: "Branch name for the agent to push (project mode, default handoff/<ts>)"
+        required: false
+        default: ""
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -19,8 +26,11 @@ jobs:
       - name: Dispatch task to HF ZeroGPU space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           TASK: "${{ github.event.inputs.task }}"
           ENGINE: "${{ github.event.inputs.engine || 'opencode' }}"
+          PROJECT: "${{ github.event.inputs.project }}"
+          BRANCH: "${{ github.event.inputs.branch }}"
         run: |
           SPACE="https://oxmoiz-qwen-mesh-agent.hf.space"
           if [ "$ENGINE" = "swarm" ]; then
@@ -29,6 +39,9 @@ jobs:
             TASK_JSON=$(jq -n --arg t "$TASK" '{pi: {prompt: $t, timeout: 420}}')
           elif [ "$ENGINE" = "codex" ]; then
             TASK_JSON=$(jq -n --arg t "$TASK" '{codex: {prompt: $t, timeout: 420}}')
+          elif [ "$ENGINE" = "project" ] && [ -n "$PROJECT" ]; then
+            TASK_JSON=$(jq -n --arg t "$TASK" --arg p "$PROJECT" --arg k "$PRIVATE_REPO_TOKEN" --arg b "$BRANCH" \
+              '{project: {name: $p, repo: "f2025408135-cyber/qwen-research", token: $k, branch: $b, task: $t, timeout: 540}}')
           else
             TASK_JSON=$(jq -n --arg t "$TASK" '{opencode: {prompt: $t, timeout: 480}}')
           fi
@@ -43,8 +56,11 @@ jobs:
             -H "Authorization: Bearer $HF_TOKEN" \
             "$SPACE/gradio_api/call/run_task/$eid" > stream.txt || true
           out=$(grep '^data: ' stream.txt | grep -v '^data: null' | tail -1 | sed 's/^data: //' \
-            | jq -r '.[0] | fromjson | (.stdout // .final // empty)' 2>/dev/null || echo "")
+            | jq -r '.[0] | fromjson | (.stdout // .summary // .final // empty)' 2>/dev/null || echo "")
+          br=$(grep '^data: ' stream.txt | grep -v '^data: null' | tail -1 | sed 's/^data: //' \
+            | jq -r '.[0] | fromjson | .branch // empty' 2>/dev/null || echo "")
           [ -n "$out" ] || { echo "TASK FAILED"; tail -5 stream.txt; exit 1; }
+          [ -n "$br" ] && echo "=== branch pushed: $br ==="
           echo "$out" > result.md
           echo "=== result ==="
           head -50 result.md

@@ -545,6 +545,8 @@ def run_task(task_json: str) -> str:
                              int(task["opencode"].get("timeout", 300)), [])
             r["elapsed"] = round(time.time() - t0, 2)
             return json.dumps(r)
+        if "project" in task:
+            return json.dumps(run_project(task["project"], t0))
         if "agent" in task:
             return json.dumps(run_agent(task["agent"], t0))
         if "hermes" in task:
@@ -557,6 +559,66 @@ def run_task(task_json: str) -> str:
                            "python": sys.version, "elapsed": round(time.time() - t0, 2)})
     except Exception:
         return json.dumps({"ok": False, "error": traceback.format_exc()[-3000:]})
+
+
+def run_project(pconf: dict, t0: float) -> dict:
+    """Full-context coding handoff: clone the private repo, install deps,
+    opencode codes INSIDE the project, commit+push a handoff branch back."""
+    import shutil as _sh
+    log = []
+    repo = str(pconf.get("repo", "f2025408135-cyber/qwen-research"))
+    token = str(pconf.get("token", ""))
+    name = str(pconf.get("name", "")).strip("/")
+    task = str(pconf.get("task", "")).strip()
+    branch_in = str(pconf.get("branch", "")).strip()
+    timeout = int(pconf.get("timeout", 480))
+    if not task or not name:
+        return {"ok": False, "error": "project.task and project.name required"}
+    if not token:
+        return {"ok": False, "error": "project.token required for clone + push"}
+    proj_root = os.path.expanduser("~/projects")
+    proj_dir = os.path.join(proj_root, name)
+    _sh.rmtree(proj_dir, ignore_errors=True)
+    os.makedirs(proj_root, exist_ok=True)
+    url = f"https://x-access-token:{token}@github.com/{repo}.git"
+    r = subprocess.run(["git", "clone", "--depth", "1", url, proj_dir],
+                       capture_output=True, text=True, timeout=300)
+    if not os.path.exists(proj_dir):
+        return {"ok": False, "error": "clone failed: " + (r.stderr or "")[-300:]}
+    log.append(f"clone: {repo}/projects/{name}")
+    # auto-install deps (node / python)
+    if str(pconf.get("install", "auto")) == "auto":
+        if os.path.exists(os.path.join(proj_dir, "package.json")):
+            ri = subprocess.run(["bash", "-c",
+                                 f"cd '{proj_dir}' && npm install --no-audit --no-fund 2>&1 | tail -3"],
+                                capture_output=True, text=True, timeout=900)
+            log.append("install: npm done")
+        if os.path.exists(os.path.join(proj_dir, "requirements.txt")):
+            ri = subprocess.run(["bash", "-c",
+                                 f"cd '{proj_dir}' && pip install -q -r requirements.txt 2>&1 | tail -3"],
+                                capture_output=True, text=True, timeout=900)
+            log.append("install: pip done")
+    # agent codes inside the project, then commits + pushes the branch
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    branch = branch_in or f"handoff/{ts}"
+    agent_task = (
+        "You are working inside a cloned project (current directory). "
+        f"TASK: {task} "
+        f"When done: git checkout -b {branch}; git add -A; "
+        f"git commit -m 'handoff {ts}'; git push origin {branch}. "
+        "Then reply with a one-paragraph summary of what changed.")
+    r = run_opencode(agent_task, timeout, log)
+    changed = []
+    try:
+        rc = subprocess.run(["git", "diff", "--name-only", "origin/main", "HEAD"],
+                            cwd=proj_dir, capture_output=True, text=True, timeout=60)
+        changed = [l for l in (rc.stdout or "").splitlines() if l.strip()]
+    except Exception:
+        pass
+    return {"ok": r.get("ok", False), "branch": branch,
+            "summary": (r.get("stdout") or "")[-4000:],
+            "changed_files": changed[:50], "agent": r, "bootstrap_log": log,
+            "elapsed": round(time.time() - t0, 2)}
 
 
 def run_agent(agent: dict, t0: float) -> dict:
