@@ -220,9 +220,9 @@ function Run-Wave($topics, $startAcct) {
     if ($rep) {
       if ($rep.result) { $res = Get-Content $rep.result -Raw | ConvertFrom-Json }
       $safeTopic = ($chatIds[$idx-1].topic -replace '[^a-zA-Z0-9]','-').Substring(0, [Math]::Min(40, $chatIds[$idx-1].topic.Length))
-      $mdDst = "$OutDir\qwen-research-$safeTopic-$ts.md"
+      $mdDst = "$OutDir\qwen-research-$safeTopic-$ts-w$idx.md"   # $idx: prevent overwrite when topics share a prefix
       Copy-Item $rep.md $mdDst -Force
-      if ($rep.pdf) { Copy-Item $rep.pdf "$OutDir\qwen-research-$safeTopic-$ts.pdf" -Force }
+      if ($rep.pdf) { Copy-Item $rep.pdf "$OutDir\qwen-research-$safeTopic-$ts-w$idx.pdf" -Force }
       $head = Get-Content $mdDst -TotalCount 1
       $bytes = (Get-Item $mdDst).Length
       Log "WAVE $idx/$($runs.Count): $safeTopic -> $bytes bytes, $($res.references_count) refs"

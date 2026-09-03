@@ -23,15 +23,20 @@ on:
         type: string
         default: '1500'
       account_index:
-        description: 'Qwen account/pod index 1-5 (one dispatch per account for parallel waves)'
+        description: 'Qwen account/pod index 1-25 (one dispatch per account for parallel waves)'
         required: false
         type: string
         default: '1'
       mode:
-        description: 'spike = login+WAF probe only | research = full deep research'
+        description: 'research = full deep research | collect = poll existing chat_id | warmup = login+greeting unlock probe | auth-test = credential check | spike = WAF probes'
         required: false
         type: string
         default: 'research'
+      warmup:
+        description: '1 = send one normal greeting chat before deep_research (WAF unlock for history-less accounts 6-25); 0 = disable'
+        required: false
+        type: string
+        default: '1'
       os:
         description: 'Runner OS — macos-latest uses GitHub macOS cloud IPs (NOT Azure; dodges IP-range blocks)'
         required: false
@@ -113,6 +118,7 @@ jobs:
           INPUT_MODE: ${{ github.event.inputs.mode }}
           INPUT_HEADED: ${{ github.event.inputs.headed }}
           INPUT_CHAT_ID: ${{ github.event.inputs.chat_id }}
+          INPUT_WARMUP: ${{ github.event.inputs.warmup }}
         run: |
           if [ "${{ github.event.inputs.headed }}" = "1" ]; then
             xvfb-run -a node runner/deep-research.mjs

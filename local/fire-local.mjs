@@ -119,6 +119,40 @@ if (!stored) {
   await sleep(5000)
 }
 
+// 0) WAF WARM-UP for history-less accounts (6-25): one normal greeting
+//    exchange in the SAME browser session BEFORE the deep_research POST.
+//    Field-verified 2026-09-04: fresh-JWT accounts get deep_research silently
+//    dropped by the WAF; one normal exchange unlocks it (operator-verified).
+//    FIRE_WARMUP=0 disables (accounts 1-5 are matured and don't need it).
+const wantWarmup = (process.env.FIRE_WARMUP || "1") !== "0"
+let warmupOk = false
+let warmupChatId = null
+if (wantWarmup) {
+  try {
+    const wChat = JSON.parse(await cdpEval(cdpFetchExpr(`${GLOBAL_BASE}/api/v2/chats/new`, {}), 30000))
+    warmupChatId = wChat?.data?.id || wChat?.id
+    if (warmupChatId) {
+      const wMsg = {
+        id: null, fid: crypto.randomUUID(), parentId: null, childrenIds: [crypto.randomUUID()],
+        role: "user", content: "Hello! Just saying hi - how are you today?", user_action: "chat", files: [],
+        timestamp: Math.floor(Date.now() / 1000), models: [MODEL], model: "", chat_type: "chat",
+        feature_config: { thinking_enabled: false, output_schema: "message", research_mode: "normal", auto_thinking: false, thinking_mode: "Auto", thinking_format: "summary", auto_search: false },
+        extra: {}, sub_chat_type: "",
+      }
+      const wBody = JSON.stringify({
+        stream: false, version: "2.1", incremental_output: false, chatId: warmupChatId, parentId: null,
+        chat_id: warmupChatId, chat_mode: "normal", model: MODEL, parent_id: null,
+        messages: [wMsg], timestamp: Math.floor(Date.now() / 1000),
+      })
+      const wPost = JSON.parse(await cdpEval(`(async()=>{try{const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${warmupChatId}',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${account.ticket}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()},body:${JSON.stringify(wBody)}});const t=await r.text();return JSON.stringify({status:r.status,head:t.slice(0,120)})}catch(e){return JSON.stringify({status:0,error:e.message})}})()`, 90000))
+      warmupOk = wPost.status === 200
+      log(`warm-up: ${warmupOk ? "ok" : "FAILED " + JSON.stringify(wPost).slice(0, 120)} (chat ${warmupChatId})`)
+    } else {
+      log("warm-up: no warmup chat_id (continuing)")
+    }
+  } catch (e) { log(`warm-up error (continuing anyway): ${e.message}`) }
+} else { log("warm-up disabled (FIRE_WARMUP=0)") }
+
 // 1) create the chat
 let create
 try { create = JSON.parse(await cdpEval(cdpFetchExpr(`${GLOBAL_BASE}/api/v2/chats/new`, {}), 30000)) }
@@ -183,4 +217,4 @@ for (let i = 0; i < 6; i++) {
 // Kill the pod if we launched it (we only needed it for the POST)
 if (pod) { try { pod.kill(); log("pod closed") } catch {} }
 
-console.log(JSON.stringify({ ok: true, chat_id: chatId, account_index: accountIndex, completions_status: postStatus, notice_returned: noticeOk, notice_seen: noticeSeen }))
+console.log(JSON.stringify({ ok: true, chat_id: chatId, account_index: accountIndex, completions_status: postStatus, notice_returned: noticeOk, notice_seen: noticeSeen, warmup_ok: warmupOk, warmup_chat_id: warmupChatId }))

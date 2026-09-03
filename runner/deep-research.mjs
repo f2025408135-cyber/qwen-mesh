@@ -171,6 +171,40 @@ function completionsBody(chatId, messages) {
   }
 }
 
+// WAF warm-up: send one normal (chat_type "chat") greeting and confirm the
+// assistant reply. Field-verified 2026-09-04: history-less accounts (fresh JWT
+// pods 6-25) get deep_research completions SILENTLY DROPPED by the WAF; one
+// normal exchange in the same session unlocks deep research (operator-verified
+// manually on a 6-25 account). Non-stream first (spike probe B: stream:false
+// works where SSE tarpits); fallback = fire-and-forget + poll for the reply.
+async function warmupNormalChat() {
+  const chatId = await createChat()
+  const greeting = "Hello! Just saying hi - how are you today?"
+  const nb = completionsBody(chatId, [userMessage(greeting)])
+  nb.stream = false
+  nb.incremental_output = false
+  try {
+    await qwenApi(`/api/v2/chat/completions?chat_id=${chatId}`, nb, "POST", 90000)
+    log(`warmup: normal exchange ok (chat ${chatId}, via nonstream)`)
+    return { ok: true, chat_id: chatId, via: "nonstream" }
+  } catch (e) {
+    log(`warmup nonstream failed (${String(e.message).slice(0, 80)}); fire-and-forget + poll fallback`)
+    try {
+      await qwenApi(`/api/v2/chat/completions?chat_id=${chatId}`, completionsBody(chatId, [userMessage(greeting)]), "POST", 30000)
+    } catch {}
+    for (let i = 0; i < 5; i++) {
+      await sleep(8000)
+      try {
+        const j = await qwenApi(`/api/v2/chats/${chatId}?direction=up&limit=10`, {}, "GET", 30000)
+        const msgs = j?.data?.chat?.history?.messages ?? {}
+        const replied = Object.values(msgs).some((m) => m?.role === "assistant" && (m?.content ?? "").length > 0)
+        if (replied) { log(`warmup: reply confirmed via poll (chat ${chatId})`); return { ok: true, chat_id: chatId, via: "poll" } }
+      } catch {}
+    }
+    return { ok: false, chat_id: chatId, error: String(e.message).slice(0, 200) }
+  }
+}
+
 async function createChat() {
   const j = await qwenApi("/api/v2/chats/new", {})
   const chatId = j?.data?.id || j?.id
@@ -361,6 +395,15 @@ async function runSpike() {
 async function runResearch() {
   try {
     await loginPod()
+    // WAF warm-up for history-less accounts (pods 6-25): one normal exchange
+    // BEFORE the deep_research POST. INPUT_WARMUP=0 disables (accounts 1-5
+    // don't need it — matured). Warm-up failure never aborts the run.
+    let warmup = { ok: false, skipped: true }
+    if (process.env.INPUT_WARMUP !== "0") {
+      log("warm-up: normal chat exchange first (WAF gate)")
+      warmup = await warmupNormalChat()
+      log(`warm-up: ${warmup.ok ? "ok" : "FAILED - continuing anyway"}`)
+    }
     let content = topic
     if (focus) content += `\nFocus: ${focus}`
     if (audience) content += `\nAudience: ${audience}`
@@ -423,6 +466,7 @@ async function runResearch() {
       md_bytes: mdBytes,
       pdf_bytes: pdfBytes,
       md_link: mdLink,
+      warmup: warmup.ok ? "ok" : (warmup.skipped ? "skipped" : "failed"),
       elapsed_sec: Math.round((Date.now() - t0) / 1000),
     }
     writeFileSync(`${OUT_DIR}/result.json`, JSON.stringify(result, null, 2))
@@ -541,7 +585,31 @@ async function runAuthTest() {
   }
 }
 
+// WARMUP: fast account-readiness probe — login (JWT→localStorage) + ONE normal
+// greeting exchange (the WAF unlock). ~60-120s. WARMUP-OK = credential valid,
+// WAF accepts in-page fetches, AND the account completes a normal reply.
+// Combine with mode=research for full deep research (warm-up runs there too).
+async function runWarmup() {
+  try {
+    await loginPod()
+    const w = await warmupNormalChat()
+    const result = {
+      ok: w.ok, status: w.ok ? "WARMUP-OK" : "WARMUP-FAIL", mode: "warmup",
+      account_index: accountIndex, chat_id: w.chat_id, via: w.via ?? null,
+      elapsed_sec: Math.round((Date.now() - t0) / 1000),
+    }
+    mkdirSync(OUT_DIR, { recursive: true })
+    writeFileSync(`${OUT_DIR}/result.json`, JSON.stringify(result, null, 2))
+    log(result.status, JSON.stringify(result))
+    if (!w.ok) process.exit(1)
+    process.exit(0)
+  } catch (e) {
+    fail(e.status || 502, e.message)
+  }
+}
+
 if (mode === "spike") await runSpike()
 else if (mode === "collect") await runCollect()
 else if (mode === "auth-test") await runAuthTest()
+else if (mode === "warmup") await runWarmup()
 else await runResearch()
