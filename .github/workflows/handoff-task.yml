@@ -1,0 +1,69 @@
+name: handoff-task
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task for the coding agent (runs on the HF space, independent of your PC)"
+        required: true
+        default: "Summarize the repo layout of services/remote-mesh and list 3 improvements."
+      engine:
+        description: "opencode | swarm | pi | codex"
+        required: false
+        default: "opencode"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch task to HF ZeroGPU space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TASK: "${{ github.event.inputs.task }}"
+          ENGINE: "${{ github.event.inputs.engine || 'opencode' }}"
+        run: |
+          SPACE="https://oxmoiz-qwen-mesh-agent.hf.space"
+          if [ "$ENGINE" = "swarm" ]; then
+            TASK_JSON=$(jq -n --arg t "$TASK" '{swarm: {task: $t, workers: 5, engine: "opencode", worker_timeout: 300, phase_timeout: 300}}')
+          elif [ "$ENGINE" = "pi" ]; then
+            TASK_JSON=$(jq -n --arg t "$TASK" '{pi: {prompt: $t, timeout: 420}}')
+          elif [ "$ENGINE" = "codex" ]; then
+            TASK_JSON=$(jq -n --arg t "$TASK" '{codex: {prompt: $t, timeout: 420}}')
+          else
+            TASK_JSON=$(jq -n --arg t "$TASK" '{opencode: {prompt: $t, timeout: 480}}')
+          fi
+          BODY=$(jq -n --argjson d "$TASK_JSON" '{data: [$d | tojson], event_data: null}')
+          eid=$(curl -s -X POST "$SPACE/gradio_api/call/run_task" \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" | jq -r '.event_id')
+          [ "$eid" != "null" ] && [ -n "$eid" ] || { echo "SUBMIT FAILED"; exit 1; }
+          echo "event: $eid"
+          curl -s -N --max-time 1100 \
+            -H "Authorization: Bearer $HF_TOKEN" \
+            "$SPACE/gradio_api/call/run_task/$eid" > stream.txt || true
+          out=$(grep '^data: ' stream.txt | grep -v '^data: null' | tail -1 | sed 's/^data: //' \
+            | jq -r '.[0] | fromjson | (.stdout // .final // empty)' 2>/dev/null || echo "")
+          [ -n "$out" ] || { echo "TASK FAILED"; tail -5 stream.txt; exit 1; }
+          echo "$out" > result.md
+          echo "=== result ==="
+          head -50 result.md
+
+      - name: Deliver result to private repo (survives your PC being off)
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO_NAME: ${{ secrets.PRIVATE_REPO_NAME }}
+        run: |
+          [ -f result.md ] || { echo "no result"; exit 0; }
+          [ -n "$PRIVATE_REPO_TOKEN" ] && [ -n "$PRIVATE_REPO_NAME" ] || { echo "::warning::private repo secrets missing"; exit 0; }
+          git clone --quiet --depth 1 "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/${PRIVATE_REPO_NAME}.git" ./qwen-research
+          mkdir -p ./qwen-research/handoffs
+          ts=$(date -u +%Y%m%d-%H%M%S)
+          cp result.md "./qwen-research/handoffs/handoff-${ts}-${GITHUB_RUN_ID}.md"
+          cd ./qwen-research
+          git config user.name "handoff-bot"
+          git config user.email "handoff@users.noreply.github.com"
+          git add -A
+          git commit -m "handoff result ${ts} (run ${GITHUB_RUN_ID})"
+          git push --quiet
+          echo "delivered: handoffs/handoff-${ts}-${GITHUB_RUN_ID}.md"

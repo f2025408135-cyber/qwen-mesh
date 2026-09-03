@@ -23,12 +23,14 @@ _hermes_lock = threading.Lock()
 AGENT_BIN = os.path.expanduser("~/.agent-bin")
 CODEX_BIN = os.path.join(AGENT_BIN, "codex")
 PI_BIN = os.path.join(AGENT_BIN, "pi")
+OPENCODE_BIN = os.path.expanduser("~/.opencode/bin/opencode")
 CODEX_HOME = os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex-space"))
 PI_HOME = os.environ.get("PI_HOME", os.path.expanduser("~/.pi-space"))
 SWARM_ROOT = os.path.expanduser("~/swarm")
 CODEX_VERSION = "rust-v0.92.0"  # last era with wire_api="chat" (removed Feb 2026, PR #10157)
 CODEX_URL = f"https://github.com/openai/codex/releases/download/{CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz"
 PI_URL = "https://github.com/badlogic/pi-mono/releases/latest/download/pi-linux-x64.tar.gz"
+OPENCODE_URL = "https://opencode.ai/install"
 _swarm_lock = threading.Lock()
 
 
@@ -161,6 +163,58 @@ def shutil_move(src: str, dst: str) -> None:
     shutil.move(src, dst)
 
 
+def _ensure_opencode(log) -> None:
+    """Install opencode CLI via the official installer (cached per container).
+    Routes through the local LiteLLM bridge -> native gemini (ox-alpha-free is
+    local-router-only and unreachable from the space)."""
+    import urllib.request as _u
+    if not os.path.exists(OPENCODE_BIN):
+        log.append("opencode: running official installer...")
+        r = subprocess.run(["bash", "-c", f"curl -fsSL '{OPENCODE_URL}' | bash"],
+                           capture_output=True, text=True, timeout=600)
+        if not os.path.exists(OPENCODE_BIN):
+            raise RuntimeError("opencode install failed: " + (r.stderr or r.stdout or "")[-300:])
+        os.chmod(OPENCODE_BIN, 0o755)
+        log.append("opencode: installed")
+    # config: litellm bridge provider
+    oc_cfg = os.path.expanduser("~/.config/opencode/opencode.json")
+    if not os.path.exists(oc_cfg):
+        os.makedirs(os.path.dirname(oc_cfg), exist_ok=True)
+        with open(oc_cfg, "w") as f:
+            json.dump({
+                "$schema": "https://opencode.ai/config.json",
+                "provider": {
+                    "litellm": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "LiteLLM bridge (native gemini)",
+                        "options": {"baseURL": "http://127.0.0.1:4000/v1", "apiKey": "space-local"},
+                        "models": {"gemini-2.5-flash": {"name": "Gemini 2.5 Flash"}},
+                    }
+                },
+                "model": "litellm/gemini-2.5-flash",
+                "small_model": "litellm/gemini-2.5-flash",
+            }, f, indent=2)
+        log.append("opencode: config written (litellm bridge)")
+
+
+def run_opencode(prompt: str, timeout: int, log: list) -> dict:
+    """Headless opencode run (full tool access) via the LiteLLM bridge."""
+    _ensure_swarm_binaries(log)
+    _ensure_litellm(log)
+    _ensure_opencode(log)
+    os.makedirs(SWARM_ROOT, exist_ok=True)
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(OPENCODE_BIN) + os.pathsep + env.get("PATH", "")
+    args = [OPENCODE_BIN, "run", "--auto", "-m", "litellm/gemini-2.5-flash", prompt]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env,
+                           cwd=SWARM_ROOT)
+        return {"ok": r.returncode == 0, "stdout": (r.stdout or "")[-8000:],
+                "stderr": (r.stderr or "")[-1500:], "exit": r.returncode}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"opencode timeout > {timeout}s"}
+
+
 def run_codex(prompt: str, timeout: int, log: list) -> dict:
     """One-shot codex exec (orchestrator). Speaks Responses API via LiteLLM."""
     _ensure_swarm_binaries(log)
@@ -235,13 +289,18 @@ def run_swarm(sconf: dict, t0: float) -> dict:
     subtasks = (subtasks + [task] * n_workers)[:n_workers]
     log.append(f"plan: {len(subtasks)} subtasks")
 
-    # Phase 2: pi workers in parallel (staggered 8s, rotating keys)
+    # Phase 2: workers in parallel (staggered 8s, rotating keys)
+    # engine: "pi" (default) or "opencode" — full coding agent with tools
+    engine = str(sconf.get("engine", "pi"))
     results = [None] * len(subtasks)
     def _worker(i, st):
-        key = keys[i % len(keys)]
-        if len(keys) > 1:
-            time.sleep(8 * (i % len(keys)))  # spread per-key RPM
-        results[i] = run_pi(st, w_timeout, key, os.path.join(SWARM_ROOT, f"worker-{i}"), log)
+        if engine == "opencode":
+            results[i] = run_opencode(st, w_timeout, log)
+        else:
+            key = keys[i % len(keys)]
+            if len(keys) > 1:
+                time.sleep(8 * (i % len(keys)))  # spread per-key RPM
+            results[i] = run_pi(st, w_timeout, key, os.path.join(SWARM_ROOT, f"worker-{i}"), log)
     threads = [threading.Thread(target=_worker, args=(i, st)) for i, st in enumerate(subtasks)]
     for t in threads: t.start()
     for t in threads: t.join()
@@ -479,6 +538,11 @@ def run_task(task_json: str) -> str:
             r = run_pi(str(task["pi"].get("prompt", "")),
                        int(task["pi"].get("timeout", 240)),
                        keys[0], os.path.join(SWARM_ROOT, "single-pi"), [])
+            r["elapsed"] = round(time.time() - t0, 2)
+            return json.dumps(r)
+        if "opencode" in task:
+            r = run_opencode(str(task["opencode"].get("prompt", "")),
+                             int(task["opencode"].get("timeout", 300)), [])
             r["elapsed"] = round(time.time() - t0, 2)
             return json.dumps(r)
         if "agent" in task:
