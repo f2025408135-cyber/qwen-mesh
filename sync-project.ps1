@@ -13,16 +13,23 @@ param(
   [Parameter(Mandatory = $true)][string]$Name
 )
 
-$ErrorActionPreference = "Stop"
 $Repo = "f2025408135-cyber/qwen-research"
 $Work = "$env:TEMP\qwen-research-sync"
+
+# profile-set GH_TOKEN can shadow gh's keyring login with a limited fine-grained
+# token -> git 401s. Force gh back to the keyring credential.
+Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
+Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
 
 if (-not (Test-Path $Dir)) { Write-Host "[sync] dir not found: $Dir" -ForegroundColor Red; exit 1 }
 $Dir = (Resolve-Path $Dir).Path
 
+$tok = (gh auth token) 2>$null
+if (-not $tok) { Write-Host "[sync] gh auth token unavailable" -ForegroundColor Red; exit 1 }
+
 Write-Host "[sync] cloning $Repo ..." -ForegroundColor Cyan
 if (Test-Path $Work) { Remove-Item $Work -Recurse -Force }
-gh repo clone $Repo $Work -- --depth 1
+git clone --quiet --depth 1 "https://x-access-token:$tok@github.com/$Repo.git" $Work
 if ($LASTEXITCODE -ne 0) { Write-Host "[sync] clone failed" -ForegroundColor Red; exit 1 }
 
 $dst = Join-Path $Work "projects\$Name"
@@ -39,7 +46,7 @@ Push-Location $Work
 try {
   git add -A
   $stat = git diff --cached --stat | Select-Object -Last 1
-  git -c user.name="sync-bot" -c user.email="sync@users.noreply.github.com" commit -m "sync project '$Name' ($($stat))" | Out-Null
+  git -c user.name="sync-bot" -c user.email="sync@users.noreply.github.com" commit -m "sync project '$Name' ($stat)" --quiet
   git push --quiet
   Write-Host "[sync] pushed: $Repo -> projects/$Name ($stat)" -ForegroundColor Green
   Write-Host "[sync] now hand off: .\handoff.ps1 -Task '...' -Project $Name" -ForegroundColor Yellow

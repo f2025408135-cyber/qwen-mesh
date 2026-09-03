@@ -23,6 +23,10 @@ param(
 
 $Repo = "f2025408135-cyber/qwen-mesh"
 
+# profile-set GH_TOKEN can shadow gh's keyring login -> 401s. Use keyring.
+Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
+Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+
 Write-Host "[handoff] engine=$Engine" -ForegroundColor Cyan
 
 if ($Project) {
