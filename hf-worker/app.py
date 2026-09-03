@@ -31,6 +31,9 @@ CODEX_VERSION = "rust-v0.92.0"  # last era with wire_api="chat" (removed Feb 202
 CODEX_URL = f"https://github.com/openai/codex/releases/download/{CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz"
 PI_URL = "https://github.com/badlogic/pi-mono/releases/latest/download/pi-linux-x64.tar.gz"
 OPENCODE_URL = "https://opencode.ai/install"
+# 3.5-flash-lite: fresh free-tier bucket. gemini-2.5-flash is capped at
+# 20 requests/day/project (one opencode session burns 10-20 -> 429s).
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 _swarm_lock = threading.Lock()
 
 
@@ -91,7 +94,7 @@ def _ensure_swarm_binaries(log) -> None:
         cfg = os.path.join(CODEX_HOME, "config.toml")
         with open(cfg, "w") as f:
             f.write('model_provider = "litellm"\n'
-                    'model = "gemini-2.5-flash"\n'
+                    'model = "' + GEMINI_MODEL + '"\n'
                     'approval_policy = "never"\n'
                     'sandbox_mode = "danger-full-access"\n'
                     '[model_providers.litellm]\n'
@@ -130,14 +133,26 @@ def _ensure_litellm(log) -> None:
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "litellm[proxy]"],
                            capture_output=True, text=True, timeout=900)
         os.makedirs(AGENT_BIN, exist_ok=True)
+        # one deployment per pooled key: on 429/quota litellm cools that
+        # deployment down and retries the next key automatically
+        keys = _gemini_keys()
+        lines = ["model_list:\n"]
+        for i, k in enumerate(keys):
+            lines.append(f'  - model_name: {GEMINI_MODEL}\n'
+                         f'    litellm_params:\n'
+                         f'      model: gemini/{GEMINI_MODEL}\n'
+                         f'      api_key: os.environ/GEMINI_K{i}\n')
         with open(LITELLM_YAML, "w") as f:
-            f.write('model_list:\n'
-                    '  - model_name: gemini-2.5-flash\n'
-                    '    litellm_params:\n'
-                    '      model: gemini/gemini-2.5-flash\n'
-                    '      api_key: os.environ/GEMINI_API_KEY\n')
+            f.write("".join(lines) +
+                    "router_settings:\n"
+                    "  num_retries: 3\n"
+                    "  retry_after: 5\n"
+                    "  cooldown_time: 30\n"
+                    "  allowed_fails: 1\n")
         env = dict(os.environ)
-        env["GEMINI_API_KEY"] = _gemini_keys()[0]
+        env.pop("GEMINI_API_KEY", None)
+        for i, k in enumerate(keys):
+            env[f"GEMINI_K{i}"] = k
         import shutil as _shutil
         litellm_exe = _shutil.which("litellm") or "/usr/local/bin/litellm"
         logf = open(os.path.join(AGENT_BIN, "litellm.log"), "w")
@@ -155,7 +170,14 @@ def _ensure_litellm(log) -> None:
                         return
             except Exception:
                 time.sleep(2)
-        raise RuntimeError("litellm bridge did not become ready in 120s")
+                if _litellm_proc is not None and _litellm_proc.poll() is not None:
+                    break
+        try:
+            with open(os.path.join(AGENT_BIN, "litellm.log")) as f:
+                tail = f.read()[-1500:]
+        except Exception:
+            tail = "(no litellm.log)"
+        raise RuntimeError("litellm bridge did not become ready in 120s; log tail: " + tail)
 
 
 def shutil_move(src: str, dst: str) -> None:
@@ -188,30 +210,36 @@ def _ensure_opencode(log) -> None:
                         "npm": "@ai-sdk/openai-compatible",
                         "name": "LiteLLM bridge (native gemini)",
                         "options": {"baseURL": "http://127.0.0.1:4000/v1", "apiKey": "space-local"},
-                        "models": {"gemini-2.5-flash": {"name": "Gemini 2.5 Flash"}},
+                        "models": {GEMINI_MODEL: {"name": "Gemini 3.5 Flash Lite"}},
                     }
                 },
-                "model": "litellm/gemini-2.5-flash",
-                "small_model": "litellm/gemini-2.5-flash",
+                "model": "litellm/" + GEMINI_MODEL,
+                "small_model": "litellm/" + GEMINI_MODEL,
             }, f, indent=2)
         log.append("opencode: config written (litellm bridge)")
 
 
-def run_opencode(prompt: str, timeout: int, log: list) -> dict:
+def run_opencode(prompt: str, timeout: int, log: list, cwd: str = "") -> dict:
     """Headless opencode run (full tool access) via the LiteLLM bridge."""
+    print("[opencode] ENTER", flush=True)
     _ensure_swarm_binaries(log)
     _ensure_litellm(log)
     _ensure_opencode(log)
-    os.makedirs(SWARM_ROOT, exist_ok=True)
+    if not cwd:
+        os.makedirs(SWARM_ROOT, exist_ok=True)
+        cwd = SWARM_ROOT
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(OPENCODE_BIN) + os.pathsep + env.get("PATH", "")
-    args = [OPENCODE_BIN, "run", "--auto", "-m", "litellm/gemini-2.5-flash", prompt]
+    args = [OPENCODE_BIN, "run", "--dir", cwd, "--auto",
+            "-m", "litellm/" + GEMINI_MODEL, prompt]
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env,
-                           cwd=SWARM_ROOT)
+                           cwd=cwd)
+        print("[opencode] DONE rc=" + str(r.returncode) + " out=" + (r.stdout or "")[:120], flush=True)
         return {"ok": r.returncode == 0, "stdout": (r.stdout or "")[-8000:],
                 "stderr": (r.stderr or "")[-1500:], "exit": r.returncode}
     except subprocess.TimeoutExpired:
+        print("[opencode] TIMEOUT after " + str(timeout) + "s", flush=True)
         return {"ok": False, "error": f"opencode timeout > {timeout}s"}
 
 
@@ -243,7 +271,7 @@ def run_pi(prompt: str, timeout: int, api_key: str, workdir: str, log: list) -> 
     os.makedirs(workdir, exist_ok=True)
     env = dict(os.environ)
     env.update({"HOME": os.path.expanduser("~"), "PI_HOME": PI_HOME})
-    args = [PI_BIN, "--provider", "google", "--model", "gemini-2.5-flash",
+    args = [PI_BIN, "--provider", "google", "--model", GEMINI_MODEL,
             "--api-key", api_key, "--mode", "text", "--no-session", "-p", prompt]
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env,
@@ -558,6 +586,7 @@ def run_task(task_json: str) -> str:
         return json.dumps({"ok": True, "note": "no script/agent/gpu - space is alive",
                            "python": sys.version, "elapsed": round(time.time() - t0, 2)})
     except Exception:
+        print("[run_task] EXCEPTION: " + traceback.format_exc()[-1500:], flush=True)
         return json.dumps({"ok": False, "error": traceback.format_exc()[-3000:]})
 
 
@@ -565,7 +594,8 @@ def run_project(pconf: dict, t0: float) -> dict:
     """Full-context coding handoff: clone the private repo, install deps,
     opencode codes INSIDE the project, commit+push a handoff branch back."""
     import shutil as _sh
-    log = []
+    log = ["project: ENTER run_project"]
+    print("[project] ENTER run_project", flush=True)
     repo = str(pconf.get("repo", "f2025408135-cyber/qwen-research"))
     token = str(pconf.get("token", ""))
     name = str(pconf.get("name", "")).strip("/")
@@ -586,6 +616,10 @@ def run_project(pconf: dict, t0: float) -> dict:
     if not os.path.exists(proj_dir):
         return {"ok": False, "error": "clone failed: " + (r.stderr or "")[-300:]}
     log.append(f"clone: {repo}/projects/{name}")
+    # the repo root contains projects/<name>/; descend to the real project dir
+    nested = os.path.join(proj_dir, "projects", name)
+    if os.path.isdir(nested):
+        proj_dir = nested
     # auto-install deps (node / python)
     if str(pconf.get("install", "auto")) == "auto":
         if os.path.exists(os.path.join(proj_dir, "package.json")):
@@ -607,7 +641,7 @@ def run_project(pconf: dict, t0: float) -> dict:
         f"When done: git checkout -b {branch}; git add -A; "
         f"git commit -m 'handoff {ts}'; git push origin {branch}. "
         "Then reply with a one-paragraph summary of what changed.")
-    r = run_opencode(agent_task, timeout, log)
+    r = run_opencode(agent_task, timeout, log, cwd=proj_dir)
     changed = []
     try:
         rc = subprocess.run(["git", "diff", "--name-only", "origin/main", "HEAD"],
