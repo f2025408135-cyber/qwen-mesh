@@ -25,9 +25,9 @@ jobs:
       - name: Dispatch hermes task to HF ZeroGPU space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          PROMPT: ${{ github.event.inputs.prompt || 'Reply with exactly: HERMES-OK' }}
-          MODEL: ${{ github.event.inputs.model || 'gemini-2.5-flash' }}
-          TASK_TIMEOUT: ${{ github.event.inputs.timeout || '300' }}
+          PROMPT: "${{ github.event.inputs.prompt || 'Reply with exactly: HERMES-OK' }}"
+          MODEL: "${{ github.event.inputs.model || 'gemini-2.5-flash' }}"
+          TASK_TIMEOUT: "${{ github.event.inputs.timeout || '300' }}"
         run: |
           SPACE="https://oxmoiz-qwen-mesh-agent.hf.space"
           TASK=$(jq -n --arg p "$PROMPT" --arg m "$MODEL" --arg t "$TASK_TIMEOUT" \
