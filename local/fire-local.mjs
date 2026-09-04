@@ -139,15 +139,22 @@ async function settleChallenge() {
 }
 
 // chats/new with punish-aware retries (first contact can be challenged).
+// NOTE: cdpFetchExpr returns the CDP wrapper {"status":200,"body":"<json string>"} —
+// the chat id lives INSIDE the inner body string (v3 bug: parsed the wrapper).
 async function createChatRetry(tries = 3, gapMs = 8000) {
   for (let i = 0; i < tries; i++) {
     let raw = null
     try {
       raw = await cdpEval(cdpFetchExpr(`${GLOBAL_BASE}/api/v2/chats/new`, {}), 30000)
-      const j = JSON.parse(raw)
-      const id = j?.data?.id || j?.id
-      if (id) return id
-      log(`chats/new try ${i + 1}/${tries}: no id${isPunish(j) ? " (WAF punish body)" : ""}: ${String(raw).slice(0, 120)}`)
+      const outer = JSON.parse(raw)
+      if (outer.status !== 200) {
+        log(`chats/new try ${i + 1}/${tries}: HTTP ${outer.status}${isPunish(outer.body) ? " (WAF punish body)" : ""}: ${String(outer.body).slice(0, 120)}`)
+      } else {
+        const j = typeof outer.body === "string" ? JSON.parse(outer.body) : outer.body
+        const id = j?.data?.id || j?.id
+        if (id) return id
+        log(`chats/new try ${i + 1}/${tries}: 200 but no id${isPunish(j) ? " (WAF punish body)" : ""}: ${String(outer.body).slice(0, 120)}`)
+      }
     } catch (e) { log(`chats/new try ${i + 1}/${tries} error: ${e.message}`) }
     if (i < tries - 1) await sleep(gapMs)
   }
