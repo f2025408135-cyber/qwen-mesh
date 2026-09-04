@@ -119,19 +119,55 @@ if (!stored) {
   await sleep(5000)
 }
 
-// 0) WAF WARM-UP for history-less accounts (6-25): one normal greeting
-//    exchange in the SAME browser session BEFORE the deep_research POST.
-//    Field-verified 2026-09-04: fresh-JWT accounts get deep_research silently
-//    dropped by the WAF; one normal exchange unlocks it (operator-verified).
-//    FIRE_WARMUP=0 disables (accounts 1-5 are matured and don't need it).
+// --- WAF helpers (fresh profiles have NO cookie jar: challenge + punish) ------
+const isPunish = (s) => /RGV587|____tmd_____|punish|FAIL_SYS_USER_VALIDATE/i.test(String(s ?? ""))
+
+// Let the page's WAF JS challenge settle (fresh profiles need this before any
+// POST passes; field-verified 2026-09-04: first-contact chats/new returns a
+// punish body with no data.id until the challenge cookies are issued).
+async function settleChallenge() {
+  for (let i = 0; i < 4; i++) {
+    await sleep(8000)
+    try {
+      const cookies = await cdpEval("document.cookie", 15000)
+      const hasClearance = /acw_tc|x5sec|acw_sc/i.test(String(cookies ?? ""))
+      log(`challenge settle ${i + 1}/4: clearance cookies ${hasClearance ? "PRESENT" : "absent"}`)
+      if (hasClearance) return true
+    } catch {}
+  }
+  return false
+}
+
+// chats/new with punish-aware retries (first contact can be challenged).
+async function createChatRetry(tries = 3, gapMs = 8000) {
+  for (let i = 0; i < tries; i++) {
+    let raw = null
+    try {
+      raw = await cdpEval(cdpFetchExpr(`${GLOBAL_BASE}/api/v2/chats/new`, {}), 30000)
+      const j = JSON.parse(raw)
+      const id = j?.data?.id || j?.id
+      if (id) return id
+      log(`chats/new try ${i + 1}/${tries}: no id${isPunish(j) ? " (WAF punish body)" : ""}: ${String(raw).slice(0, 120)}`)
+    } catch (e) { log(`chats/new try ${i + 1}/${tries} error: ${e.message}`) }
+    if (i < tries - 1) await sleep(gapMs)
+  }
+  return null
+}
+
+// WAF WARM-UP for history-less accounts (6-25): settle the challenge, then one
+// normal greeting exchange (non-stream) in the SAME browser session BEFORE the
+// deep_research POST. Field-verified 2026-09-04: fresh-JWT cookie-less accounts
+// get deep_research silently dropped/punished; a normal exchange unlocks it
+// (operator-verified manually in a logged-in session). FIRE_WARMUP=0 disables.
 const wantWarmup = (process.env.FIRE_WARMUP || "1") !== "0"
 let warmupOk = false
 let warmupChatId = null
 if (wantWarmup) {
-  try {
-    const wChat = JSON.parse(await cdpEval(cdpFetchExpr(`${GLOBAL_BASE}/api/v2/chats/new`, {}), 30000))
-    warmupChatId = wChat?.data?.id || wChat?.id
-    if (warmupChatId) {
+  await settleChallenge()
+  for (let attempt = 1; attempt <= 2 && !warmupOk; attempt++) {
+    warmupChatId = await createChatRetry()
+    if (!warmupChatId) { log(`warm-up attempt ${attempt}: no warmup chat_id`); await sleep(10000); continue }
+    try {
       const wMsg = {
         id: null, fid: crypto.randomUUID(), parentId: null, childrenIds: [crypto.randomUUID()],
         role: "user", content: "Hello! Just saying hi - how are you today?", user_action: "chat", files: [],
@@ -144,13 +180,13 @@ if (wantWarmup) {
         chat_id: warmupChatId, chat_mode: "normal", model: MODEL, parent_id: null,
         messages: [wMsg], timestamp: Math.floor(Date.now() / 1000),
       })
-      const wPost = JSON.parse(await cdpEval(`(async()=>{try{const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${warmupChatId}',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${account.ticket}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()},body:${JSON.stringify(wBody)}});const t=await r.text();return JSON.stringify({status:r.status,head:t.slice(0,120)})}catch(e){return JSON.stringify({status:0,error:e.message})}})()`, 90000))
-      warmupOk = wPost.status === 200
-      log(`warm-up: ${warmupOk ? "ok" : "FAILED " + JSON.stringify(wPost).slice(0, 120)} (chat ${warmupChatId})`)
-    } else {
-      log("warm-up: no warmup chat_id (continuing)")
-    }
-  } catch (e) { log(`warm-up error (continuing anyway): ${e.message}`) }
+      const wPost = JSON.parse(await cdpEval(`(async()=>{try{const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${warmupChatId}',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${account.ticket}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()},body:${JSON.stringify(wBody)}});const t=await r.text();return JSON.stringify({status:r.status,head:t.slice(0,160)})}catch(e){return JSON.stringify({status:0,error:e.message})}})()`, 90000))
+      // 200 is NOT enough — the WAF returns 200 with a punish BODY (RGV587).
+      warmupOk = wPost.status === 200 && !isPunish(wPost.head)
+      log(`warm-up attempt ${attempt}: ${warmupOk ? "ok (assistant replied)" : `blocked ${JSON.stringify(wPost).slice(0, 140)}`} (chat ${warmupChatId})`)
+      if (!warmupOk) await sleep(12000)
+    } catch (e) { log(`warm-up attempt ${attempt} error: ${e.message}`); await sleep(10000) }
+  }
 } else { log("warm-up disabled (FIRE_WARMUP=0)") }
 
 // 1) create the chat
@@ -162,7 +198,7 @@ if (create.status !== 200) {
   die(`chats/new HTTP ${create.status}: ${String(create.body).slice(0, 150)}`)
 }
 const chatJson = JSON.parse(create.body)
-const chatId = chatJson?.data?.id || chatJson?.id
+let chatId = chatJson?.data?.id || chatJson?.id
 if (!chatId) die("no chat_id in create response")
 log("chat created:", chatId)
 
@@ -189,14 +225,49 @@ const body = JSON.stringify({
 })
 let noticeOk = false
 let postStatus = 0
+let postPunished = false
 try {
   postStatus = await cdpEval(`(async()=>{try{const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${chatId}',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${account.ticket}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()},body:${JSON.stringify(body)}});const st=r.status;const t=await r.text();return JSON.stringify({status:st,bodyLen:t.length,head:t.slice(0,200)})}catch(e){return JSON.stringify({status:0,error:e.message})}})()`, fireCapMs)
   const postResult = JSON.parse(postStatus)
   postStatus = postResult.status
   log("completions POST:", JSON.stringify(postResult).slice(0, 300))
-  noticeOk = postResult.status === 200
+  // 200 is NOT success by itself: the WAF returns 200 with a punish BODY (RGV587).
+  postPunished = isPunish(postResult.head)
+  noticeOk = postResult.status === 200 && !postPunished
 } catch {
   log(`completions POST eval timed out after ${fireCapMs / 1000}s (stream may be open)`)
+}
+
+// If the research POST was WAF-punished: settle + redo warm-up + ONE research
+// retry in a fresh chat (the punished chat has no research server-side).
+if (postPunished) {
+  log("research POST WAF-punished — settling, redoing warm-up, one research retry")
+  try {
+    await settleChallenge()
+    await createChatRetry(1, 0).then(() => {})
+    const retryWarm = await (async () => { // one more greeting exchange
+      const rc = await createChatRetry(2, 8000)
+      if (!rc) return false
+      try {
+        const rMsg = { id: null, fid: crypto.randomUUID(), parentId: null, childrenIds: [crypto.randomUUID()], role: "user", content: "Hello again! How is your day going?", user_action: "chat", files: [], timestamp: Math.floor(Date.now() / 1000), models: [MODEL], model: "", chat_type: "chat", feature_config: { thinking_enabled: false, output_schema: "message", research_mode: "normal", auto_thinking: false, thinking_mode: "Auto", thinking_format: "summary", auto_search: false }, extra: {}, sub_chat_type: "" }
+        const rBody = JSON.stringify({ stream: false, version: "2.1", incremental_output: false, chatId: rc, parentId: null, chat_id: rc, chat_mode: "normal", model: MODEL, parent_id: null, messages: [rMsg], timestamp: Math.floor(Date.now() / 1000) })
+        const rPost = JSON.parse(await cdpEval(`(async()=>{try{const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${rc}',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${account.ticket}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()},body:${JSON.stringify(rBody)}});const t=await r.text();return JSON.stringify({status:r.status,head:t.slice(0,160)})}catch(e){return JSON.stringify({status:0,error:e.message})}})()`, 90000))
+        return rPost.status === 200 && !isPunish(rPost.head)
+      } catch { return false }
+    })()
+    log(`retry warm-up: ${retryWarm ? "ok" : "failed"}`)
+    const retryChat = await createChatRetry()
+    if (retryChat) {
+      const retryBody = JSON.stringify({
+        stream: true, version: "2.1", incremental_output: true, chatId: retryChat, parentId: null,
+        chat_id: retryChat, chat_mode: "normal", model: MODEL, parent_id: null,
+        messages: [deepResearchMessage(content)], timestamp: Math.floor(Date.now() / 1000),
+      })
+      const retryPost = JSON.parse(await cdpEval(`(async()=>{try{const r=await fetch('${GLOBAL_BASE}/api/v2/chat/completions?chat_id=${retryChat}',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ${account.ticket}','Version':'${API_VERSION}','source':'desktop','X-Request-Id':crypto.randomUUID()},body:${JSON.stringify(retryBody)}});const t=await r.text();return JSON.stringify({status:r.status,head:t.slice(0,200)})}catch(e){return JSON.stringify({status:0,error:e.message})}})()`, fireCapMs))
+      log("research retry POST:", JSON.stringify(retryPost).slice(0, 300))
+      if (retryPost.status === 200 && !isPunish(retryPost.head)) { chatId = retryChat; noticeOk = true; postStatus = 200; postPunished = false }
+    }
+  } catch (e) { log(`research retry error: ${e.message}`) }
 }
 
 // 3) confirm the chat shows research activity (ResearchNotice/content_list)
@@ -217,4 +288,4 @@ for (let i = 0; i < 6; i++) {
 // Kill the pod if we launched it (we only needed it for the POST)
 if (pod) { try { pod.kill(); log("pod closed") } catch {} }
 
-console.log(JSON.stringify({ ok: true, chat_id: chatId, account_index: accountIndex, completions_status: postStatus, notice_returned: noticeOk, notice_seen: noticeSeen, warmup_ok: warmupOk, warmup_chat_id: warmupChatId }))
+console.log(JSON.stringify({ ok: true, chat_id: chatId, account_index: accountIndex, completions_status: postStatus, notice_returned: noticeOk, notice_seen: noticeSeen, warmup_ok: warmupOk, warmup_chat_id: warmupChatId, post_punished: postPunished, research_chat_final: chatId !== (chatJson?.data?.id || chatJson?.id) }))
