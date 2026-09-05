@@ -74,7 +74,7 @@ jobs:
           path: |
             ~/.cache/ms-playwright
             ~/Library/Caches/ms-playwright
-          key: qwen-mesh-chromium-v2
+          key: qwen-mesh-chromium-v2-${{ runner.arch }}
 
       - name: Install chromium
         run: npx -y playwright install --with-deps chromium
